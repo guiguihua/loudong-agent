@@ -1,0 +1,34 @@
+id: DEPENDENCY-UPGRADE-cryptography-41to42
+source: CVE + SCA
+title: cryptography 41.x → 42.x 大版本升级——CVE-2023-50782 强制 OpenSSL 3.2 依赖
+vulnerability_type: 依赖大版本升级（含破坏性变更）
+severity: 高危
+confidence: 已确认
+affected:
+  repository: https://github.com/pyca/cryptography
+  branch_or_revision: 41.0.5 (vulnerable); fixed in 42.0.0
+  file_or_component: 整个包的 API/ABI、setup.cfg/pyproject.toml、Rust 扩展
+  function_or_version: cryptography 41.x → 42.x 升级路径
+evidence: >-
+  CVE-2023-50782（RSA PKCS#1 v1.5 Bleichenbacher 修复不完整）的完整修复
+  依赖 OpenSSL 3.2 的新 API（返回随机输出而非异常）。cryptography 42.0.0
+  将最低 OpenSSL 要求提升至 3.2，导致：
+  1. 无法在 OpenSSL < 3.2 的系统上升级（如 Ubuntu 20.04、CentOS 7）
+  2. Rust 扩展编译要求提高
+  3. 部分 deprecated API 被移除（如 load_pem_x509_certificate 的 backend 参数）
+  4. Python 3.7 支持被移除
+attack_prerequisites: >-
+  应用依赖 cryptography < 42.0.0 且使用 RSA PKCS#1 v1.5 进行加解密操作。
+scanner_recommendation: >-
+  评估 OpenSSL 版本兼容性；若目标环境不支持 OpenSSL 3.2，
+  考虑使用 RSA-OAEP 替代 PKCS#1 v1.5 作为临时缓解；
+  制定分阶段升级计划（先升级 OpenSSL → 再升级 cryptography → 最后切换加密算法）。
+cve: CVE-2023-50782
+authorization_scope: 仅限本地公开开源历史版本和非生产测试。
+constraints: >-
+  依赖大版本升级验证需要完整的 CI/CD 矩阵（多 Python 版本 × 多 OpenSSL 版本 × 多 OS）；
+  本验证仅对依赖声明、版本约束和 API 兼容性进行静态分析。
+references:
+  - https://github.com/pyca/cryptography/blob/main/CHANGELOG.rst
+  - https://cryptography.io/en/latest/changelog/#v42-0-0
+  - https://github.com/pyca/cryptography/issues/9785

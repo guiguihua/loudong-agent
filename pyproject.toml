@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulnerability-impact-agent"
+version = "0.1.0"
+description = "Rule-first vulnerability normalization and evidence-driven impact analysis"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.10,<3",
+  "uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+vuln-agent = "vuln_agent.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9", "httpx>=0.28,<1"]
+llm = ["openai>=1.0,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

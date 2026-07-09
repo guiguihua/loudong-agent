@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# validation-coverage 中的大型源码镜像（可通过脚本单独克隆）
+validation-coverage/*/django-*/
+validation-coverage/*/airflow-*/
+validation-coverage/*/authlib-*/
+validation-coverage/*/cryptography-*/
+validation-coverage/*/requests-*/
+validation-coverage/*/djoser-*/
+validation-coverage/*/filelock-*/
+validation-coverage/*/label-studio-*/
+validation-coverage/*/*/
+validation-coverage/upstream-fixed/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# 敏感文件
+.env
+*.key
