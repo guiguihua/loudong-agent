@@ -74,16 +74,14 @@ def run_json_file(
     output_dir: Path | None = None,
     full_pipeline: bool = True,
     source_dir: str | None = None,
-    use_llm: bool = False,
 ) -> int:
-    """从 JSON 文件运行流水线。
+    """从 JSON 文件运行 Agent 流水线。
 
     Args:
         file_path: JSON 文件路径
         output_dir: 输出目录
         full_pipeline: True=完整流水线(含补丁生成), False=仅分析
         source_dir: 源码目录，自动加载目录下所有文本文件作为源码上下文
-        use_llm: 启用 LLM 推理模式（需设置 DEEPSEEK_API_KEY）
     """
     path = Path(file_path)
     if not path.exists():
@@ -97,7 +95,10 @@ def run_json_file(
 
     try:
         if full_pipeline:
-            result = runner_run_file(file_path, use_llm=use_llm, source_files=source_files)
+            result = runner_run_file(
+                file_path, source_files=source_files,
+                source_dir=source_dir or str(path.parent),
+            )
             return _print_result(result, path.stem, output_dir)
         else:
             from vuln_agent.runner import run_file_simple
@@ -398,11 +399,36 @@ def _print_demo_list():
 
 def _serve(host: str, port: int, reload: bool) -> None:
     import uvicorn
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     print(f"启动 API 服务: http://{host}:{port}")
     uvicorn.run("vuln_agent.api:app", host=host, port=port, reload=reload)
 
 
 # ── argparse ──────────────────────────────────────────────────────────
+
+
+def _run_evaluate(args) -> int:
+    """运行 Agent 评估测试流程（仅 LLM 模式）。"""
+    from .evaluate import evaluate_all
+
+    # 自动加载 .env
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    except ImportError:
+        pass
+
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    demo_filter = args.demo if hasattr(args, 'demo') and args.demo else None
+    try:
+        evaluate_all(demo_filter=demo_filter, output_dir=output_dir)
+        return 0
+    except Exception as exc:
+        print(f"[评估异常] {exc}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -418,7 +444,6 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("key", nargs="?", default=None, help="demo key 或 JSON 文件路径")
     run_p.add_argument("--file", "-f", dest="file_path", default=None, help="从 JSON 文件运行")
     run_p.add_argument("--source-dir", "-s", default=None, help="源码目录，自动加载目录下所有代码文件")
-    run_p.add_argument("--llm", action="store_true", help="启用 LLM 推理模式（需 DEEPSEEK_API_KEY）")
     run_p.add_argument("--all-deps", action="store_true", help="运行所有 CVE demo")
     run_p.add_argument("--all", action="store_true", help="运行所有 demo")
     run_p.add_argument("--output-dir", "-o", default=None, help="输出目录")
@@ -432,10 +457,22 @@ def _build_parser() -> argparse.ArgumentParser:
     chat_p = sub.add_parser("chat", help="交互式对话")
     chat_p.add_argument("--output-dir", "-o", default=None, help="输出目录")
 
+    eval_p = sub.add_parser("evaluate", help="运行 Agent 评估测试流程")
+    eval_p.add_argument("--demo", "-d", nargs="+", default=None,
+                        help="指定要评估的 demo key（默认全部）")
+    eval_p.add_argument("--output-dir", "-o", default=None, help="输出目录")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 自动加载 .env（所有子命令都需要 DEEPSEEK_API_KEY）
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    except ImportError:
+        pass
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -453,7 +490,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.file_path, output_dir,
                 full_pipeline=not args.analyze_only,
                 source_dir=args.source_dir,
-                use_llm=args.llm,
             )
         if args.key:
             # 先尝试 demo key，再尝试文件路径
@@ -461,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
                 return run_preset_demo(args.key, output_dir)
             p = Path(args.key)
             if p.exists() and p.suffix == ".json":
-                return run_json_file(args.key, output_dir, full_pipeline=not args.analyze_only, source_dir=args.source_dir, use_llm=args.llm)
+                return run_json_file(args.key, output_dir, full_pipeline=not args.analyze_only, source_dir=args.source_dir)
             print(f"[错误] 未知 demo key 且文件不存在: {args.key}")
             print(f"可用 demo: {', '.join(d.key for d in DEMOS)}")
             return 1
@@ -477,12 +513,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "chat":
         return _chat_repl(args.output_dir)
 
+    elif args.command == "evaluate":
+        return _run_evaluate(args)
+
     else:
         print("漏洞修复 Agent CLI\n")
         print("用法:")
         print("  python -m vuln_agent list                  列出预置 demo")
         print("  python -m vuln_agent run <key>             运行预置 demo")
         print("  python -m vuln_agent run --file <路径>     从 JSON 文件运行完整流水线")
+        print("  python -m vuln_agent evaluate              运行完整评估测试流程")
         print("  python -m vuln_agent serve                 启动 API")
         print("  python -m vuln_agent chat                  交互式对话")
         print("\n在 Claude Code 中可以直接说:")

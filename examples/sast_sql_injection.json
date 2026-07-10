@@ -1,0 +1,14 @@
+{
+  "finding_id": "F-SQLI-001",
+  "vulnerability_type": "SQL Injection",
+  "severity": "high",
+  "confidence": "high",
+  "scanner": "SAST",
+  "affected_file": "src/user/search.py",
+  "affected_function": "search_users",
+  "line": 5,
+  "evidence": "user input 'keyword' from request.args.get('q') concatenated into SQL query — no parameterization",
+  "recommendation": "use parameterized query with bind parameters",
+  "cwe": "CWE-89",
+  "repository": "customer-service"
+}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}对话分析 — 漏洞修复智能体平台{% endblock %}
+{% block head %}
+<script src="/static/js/chat.js"></script>
+{% endblock %}
+{% block content %}
+
+<h1 class="page-title">💬 对话分析</h1>
+<p class="page-subtitle">通过对话与漏洞修复智能体交互，描述漏洞或粘贴代码即可分析</p>
+
+<div class="card chat-container" x-data="chatApp()" x-init="connect()">
+  <!-- Messages -->
+  <div class="chat-messages" id="chat-messages" x-ref="messages">
+    <template x-for="msg in messages" :key="msg.id">
+      <div class="chat-msg" :class="msg.role">
+        <div x-html="renderMarkdown(msg.content)"></div>
+        <div style="font-size: .7rem; color: var(--text2); margin-top: .25rem;"
+             x-text="msg.time"></div>
+      </div>
+    </template>
+
+    <!-- Typing indicator -->
+    <div x-show="typing" class="chat-msg agent">
+      <span class="spinner" style="width: 12px; height: 12px;"></span>
+      <span style="margin-left: .5rem; color: var(--text2);">思考中...</span>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="chat-input-area">
+    <textarea id="chat-input" rows="2" placeholder="描述漏洞、粘贴 JSON 或代码..."
+              @keydown.enter.prevent="if(!$event.shiftKey) send($event.target.value); $event.target.value=''"
+              x-ref="input"></textarea>
+    <button class="btn btn-primary" style="height: fit-content;"
+            @click="send($refs.input.value); $refs.input.value = ''">
+      📤 发送
+    </button>
+  </div>
+
+  <!-- Quick actions -->
+  <div class="flex gap-2" style="padding: .5rem 1rem; border-top: 1px solid var(--border); flex-wrap: wrap;">
+    <button class="btn btn-sm btn-secondary" @click="quickAction('help')">❓ 帮助</button>
+    <button class="btn btn-sm btn-secondary" @click="quickAction('status')">📋 任务状态</button>
+    <button class="btn btn-sm btn-secondary" @click="quickAction('demo')">🧪 SQL 注入示例</button>
+  </div>
+</div>
+
+{% endblock %}

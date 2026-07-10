@@ -1,0 +1,17 @@
+{
+  "finding_id": "CVE-2022-42889",
+  "vulnerability_type": "dependency",
+  "severity": "critical",
+  "confidence": "high",
+  "scanner": "SCA",
+  "affected_file": "pom.xml",
+  "component": "org.apache.commons:commons-text",
+  "current_version": "1.9",
+  "fixed_versions": ["1.10.0"],
+  "breaking_upgrade": false,
+  "evidence": "Commons Text 不安全插值导致远程代码执行",
+  "recommendation": "升级 commons-text 到 1.10.0+",
+  "cve": "CVE-2022-42889",
+  "cwe": "CWE-94",
+  "repository": "https://github.com/apache/commons-text"
+}

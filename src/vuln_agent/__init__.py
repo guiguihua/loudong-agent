@@ -10,7 +10,7 @@ from .patching import PatchGenerationAgent, PatchValidationAgent
 from .reporting import RemediationReportAgent
 from .remediation import RemediationPlanAgent
 from .root_cause import RootCauseAnalysisAgent
-from .runner import run_dict, run_dict_simple, run_file, run_file_simple
+from .runner import run_dict, run_file
 from .validation import ValidationToolchain
 
 __all__ = [
@@ -31,7 +31,5 @@ __all__ = [
     "get_demo",
     "list_demos",
     "run_dict",
-    "run_dict_simple",
     "run_file",
-    "run_file_simple",
 ]

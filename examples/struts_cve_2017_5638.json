@@ -1,0 +1,17 @@
+{
+  "finding_id": "CVE-2017-5638",
+  "vulnerability_type": "dependency",
+  "severity": "critical",
+  "confidence": "high",
+  "scanner": "SCA",
+  "affected_file": "pom.xml",
+  "component": "org.apache.struts:struts2-core",
+  "current_version": "2.3.31",
+  "fixed_versions": ["2.3.32", "2.5.10.1"],
+  "breaking_upgrade": false,
+  "evidence": "Struts2 Jakarta Multipart parser 存在远程代码执行漏洞",
+  "recommendation": "升级 struts2-core 到安全版本 2.3.32 或 2.5.10.1+",
+  "cve": "CVE-2017-5638",
+  "cwe": "CWE-94",
+  "repository": "https://github.com/apache/struts"
+}

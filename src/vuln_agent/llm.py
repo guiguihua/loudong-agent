@@ -386,6 +386,17 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 
 
+# ── ChatResponse ────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class ChatResponse:
+    """LLM 多轮对话响应 — Agent 循环的核心数据类型。"""
+    content: str | None
+    tool_calls: list[dict[str, Any]] | None
+    finish_reason: str | None
+
+
 @dataclass(slots=True)
 class LLMBackend:
     """封装 DeepSeek API 调用（兼容 OpenAI SDK）。
@@ -464,6 +475,69 @@ class LLMBackend:
         )
         content = response.choices[0].message.content
         return content or ""
+
+    # ── 多轮对话接口（Agent 循环使用）──────────────────────────────────
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.2,
+    ) -> "ChatResponse":
+        """多轮对话接口 — 支持工具调用的 Agent 推理循环。
+
+        Args:
+            messages: 完整对话历史（含 system/user/assistant/tool 角色）
+            tools: 可用的工具定义列表（OpenAI function calling 格式）
+            temperature: 推理温度
+
+        Returns:
+            ChatResponse: 包含 content、tool_calls、finish_reason
+        """
+        if not self.api_key:
+            raise RuntimeError("未设置 DEEPSEEK_API_KEY 环境变量，无法调用 LLM。")
+
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("需要安装 openai SDK：pip install openai")
+
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        response = client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+        finish = response.choices[0].finish_reason
+
+        # 提取 tool_calls
+        raw_tool_calls: list[dict[str, Any]] | None = None
+        if msg.tool_calls:
+            raw_tool_calls = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+
+        return ChatResponse(
+            content=msg.content,
+            tool_calls=raw_tool_calls,
+            finish_reason=finish,
+        )
 
     def _structured_call(
         self,

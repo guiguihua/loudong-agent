@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}仓库浏览器 — 漏洞修复智能体平台{% endblock %}
+{% block content %}
+
+<h1 class="page-title">📁 仓库浏览器</h1>
+<p class="page-subtitle">克隆 Git 仓库，浏览代码、分支和提交历史</p>
+
+<div x-data="repoBrowser()">
+  {% if not current_repo %}
+  <!-- Repo list + clone -->
+  <div class="card" style="margin-bottom: 1.5rem;">
+    <h3 style="margin-bottom: 1rem;">🔗 克隆仓库</h3>
+    <div class="flex gap-2">
+      <input type="text" x-ref="cloneUrl" placeholder="https://github.com/user/repo.git"
+             class="form-group" style="flex: 1; margin: 0;">
+      <button class="btn btn-primary" @click="cloneRepo($refs.cloneUrl.value)">
+        🚀 克隆
+      </button>
+    </div>
+    <p x-show="cloneMsg" x-text="cloneMsg" class="text-muted mt-1"></p>
+  </div>
+
+  {% if repos %}
+  <div class="card">
+    <h3 style="margin-bottom: 1rem;">📚 已克隆仓库</h3>
+    <table>
+      <thead><tr><th>仓库</th><th>分支</th><th>URL</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for r in repos %}
+        <tr>
+          <td><strong>{{ r.name }}</strong></td>
+          <td>{{ r.branch }}</td>
+          <td class="text-muted">{{ r.url[:60] }}{% if r.url|length > 60 %}...{% endif %}</td>
+          <td><a href="/repo/{{ r.id }}" class="btn btn-sm btn-secondary">浏览</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="text-align: center; padding: 2rem; color: var(--text2);">
+    <p>还没有克隆任何仓库</p>
+  </div>
+  {% endif %}
+
+  {% else %}
+  <!-- Repo browser -->
+  <div class="flex gap-2 mb-2">
+    <a href="/repo" class="btn btn-sm btn-secondary">← 返回列表</a>
+    <span style="font-size: 1.1rem; font-weight: 600;">{{ current_repo.name }}</span>
+    <span class="badge badge-medium">{{ current_repo.branch }}</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: 280px 1fr; gap: 1rem; min-height: 70vh;">
+    <!-- File tree -->
+    <div class="card" style="overflow-y: auto; max-height: 70vh;">
+      <h4 style="margin-bottom: .75rem;">📂 文件</h4>
+      <div class="file-tree" id="file-tree">
+        <p class="text-muted">加载中...</p>
+      </div>
+    </div>
+
+    <!-- Content area -->
+    <div>
+      <!-- File viewer -->
+      <div class="card" style="margin-bottom: 1rem;">
+        <div class="flex-between mb-2">
+          <code id="file-path" style="color: var(--accent2);">选择文件查看</code>
+          <div class="flex gap-2">
+            <select id="branch-select" class="btn btn-sm btn-secondary" style="width: auto;"
+                    onchange="location.search='?branch=' + this.value">
+              {% for b in current_repo.branches %}
+              <option value="{{ b }}" {% if b == current_repo.branch %}selected{% endif %}>{{ b }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <pre class="diff-view" id="code-viewer" style="min-height: 300px; max-height: 500px;">
+// 选择左侧文件查看代码
+        </pre>
+      </div>
+
+      <!-- Commits -->
+      <div class="card">
+        <h4 style="margin-bottom: .75rem;">📝 最近提交</h4>
+        <div id="commits-list">
+          <p class="text-muted">加载中...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+function repoBrowser() {
+  return {
+    cloneMsg: '',
+    async cloneRepo(url) {
+      if (!url) { this.cloneMsg = '请输入仓库URL'; return; }
+      this.cloneMsg = '克隆中...';
+      try {
+        const resp = await fetch('/api/git/clone', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url: url})
+        });
+        const data = await resp.json();
+        if (data.repo_id) {
+          window.location.href = '/repo/' + data.repo_id;
+        } else {
+          this.cloneMsg = '❌ ' + (data.error || '克隆失败');
+        }
+      } catch(e) {
+        this.cloneMsg = '❌ ' + e.message;
+      }
+    }
+  };
+}
+
+{% if current_repo %}
+// Load file tree
+(async function() {
+  const repoId = '{{ repo_id }}';
+  const branch = '{{ current_repo.branch }}';
+
+  // Load file tree
+  try {
+    const resp = await fetch('/api/git/' + repoId + '/tree?branch=' + branch);
+    const tree = await resp.json();
+    renderTree(tree, document.getElementById('file-tree'));
+  } catch(e) {
+    document.getElementById('file-tree').innerHTML = '<p class=text-red>加载失败</p>';
+  }
+
+  // Load commits
+  try {
+    const resp = await fetch('/api/git/' + repoId + '/commits?branch=' + branch + '&n=20');
+    const commits = await resp.json();
+    let html = '';
+    commits.forEach(c => {
+      html += '<div style="padding:.5rem 0;border-bottom:1px solid var(--border);">' +
+        '<span style="font-family:monospace;color:var(--accent2);">' + c.sha + '</span> ' +
+        '<span>' + c.message + '</span> ' +
+        '<span class=text-muted>' + c.date + '</span></div>';
+    });
+    document.getElementById('commits-list').innerHTML = html || '<p class=text-muted>无提交记录</p>';
+  } catch(e) {
+    document.getElementById('commits-list').innerHTML = '<p class=text-red>加载失败</p>';
+  }
+})();
+
+function renderTree(items, container) {
+  container.innerHTML = '';
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'tree-item ' + item.type;
+    div.textContent = (item.type === 'dir' ? '📁 ' : '📄 ') + item.name;
+    if (item.type === 'file') {
+      div.onclick = async () => {
+        document.getElementById('file-path').textContent = item.path;
+        const resp = await fetch('/api/git/{{ repo_id }}/file?path=' + encodeURIComponent(item.path) + '&branch={{ current_repo.branch }}');
+        const data = await resp.json();
+        document.getElementById('code-viewer').textContent = data.content || '';
+        hljs.highlightElement(document.getElementById('code-viewer'));
+      };
+    }
+    container.appendChild(div);
+    if (item.children) {
+      const childDiv = document.createElement('div');
+      childDiv.style.paddingLeft = '1rem';
+      renderTree(item.children, childDiv);
+      container.appendChild(childDiv);
+    }
+  });
+}
+{% endif %}
+</script>
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}历史记录 — 漏洞修复智能体平台{% endblock %}
+{% block content %}
+
+<h1 class="page-title">📋 历史记录</h1>
+<p class="page-subtitle">所有漏洞修复任务的执行记录</p>
+
+<div class="card">
+  {% if tasks %}
+  <table>
+    <thead>
+      <tr>
+        <th>时间</th>
+        <th>漏洞 ID</th>
+        <th>类型</th>
+        <th>严重性</th>
+        <th>状态</th>
+        <th>进度</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in tasks %}
+      <tr>
+        <td class="text-muted">{{ t.created_at_str }}</td>
+        <td><a href="/finding/{{ t.task_id }}" style="color: var(--accent2); text-decoration: none;">{{ t.task_id }}</a></td>
+        <td>{{ t.vuln_type or '—' }}</td>
+        <td>
+          <span class="badge badge-{{ t.severity or 'medium' }}">{{ t.severity or '—' }}</span>
+        </td>
+        <td>
+          {% if t.status == 'succeeded' %}
+            <span class="badge badge-success">✅ 成功</span>
+          {% elif t.status == 'failed' %}
+            <span class="badge badge-failed">❌ 失败</span>
+          {% elif t.status == 'running' %}
+            <span class="badge" style="background: var(--accent); color: #fff;">⏳ 运行中</span>
+          {% else %}
+            <span class="badge">❓ {{ t.status }}</span>
+          {% endif %}
+        </td>
+        <td class="text-muted" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          {{ t.progress }}
+        </td>
+        <td>
+          <div class="flex gap-2">
+            <a href="/finding/{{ t.task_id }}" class="btn btn-sm btn-secondary">查看</a>
+            {% if t.status == 'succeeded' and t.result and t.result.report_markdown %}
+            <a href="/api/tasks/{{ t.task_id }}/result" class="btn btn-sm btn-secondary" target="_blank">JSON</a>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div style="text-align: center; padding: 4rem; color: var(--text2);">
+    <p style="font-size: 3rem; margin-bottom: .5rem;">📭</p>
+    <p style="font-size: 1.1rem;">还没有任何修复记录</p>
+    <p class="mt-1">所有修复任务的执行记录会显示在这里</p>
+    <a href="/new" class="btn btn-primary mt-2">创建第一个任务</a>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}
