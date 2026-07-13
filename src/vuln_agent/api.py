@@ -856,6 +856,9 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
         if not tool_results:
             tool_results = _manual_review_validation_results()
         workspace = Path(body.get("source_dir") or Path.cwd()).resolve()
+        from .evidence import EvidenceCollector
+        task_manager.update(task_id, progress="收集并切分代码证据...", stage=1)
+        evidence_bundle = EvidenceCollector().collect(finding, sources, repo, eng)
 
         code_ctx = _build_code_context(finding, body, {})
         asset_ctx = _build_asset_context(finding, body, {})
@@ -878,7 +881,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 workspace=workspace,
             )
             impact_agent.max_turns = 12 if not fast_mode else 6
-            impact = impact_agent.analyze(finding)
+            impact = impact_agent.analyze(finding, evidence_bundle)
         except Exception as exc:
             impact = _fallback_impact(finding, code_ctx, asset_ctx, runtime_ctx, exc)
 
@@ -895,7 +898,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 if isinstance(root_cause_ctx, DependencyRootCauseContext) else {},
             ), llm=llm, workspace=workspace)
             rc_agent.max_turns = 12 if not fast_mode else 6
-            root_cause = rc_agent.analyze(finding, impact)
+            root_cause = rc_agent.analyze(finding, impact, evidence_bundle)
         except Exception as exc:
             root_cause = _fallback_root_cause(finding, root_cause_ctx, exc)
 
@@ -935,7 +938,10 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
         loop.failure_analysis_agent.max_turns = 6 if not fast_mode else 4
 
         try:
-            result = loop.run(finding, impact, root_cause, eng, repo, sources, [tool_results])
+            result = loop.run(
+                finding, impact, root_cause, eng, repo, sources,
+                [tool_results], evidence_bundle,
+            )
         except Exception as loop_exc:
             # 循环失败时生成回退的修复方案用于报告展示
             fallback_plan = _fallback_remediation_plan(finding, impact, root_cause, eng, loop_exc)
@@ -943,6 +949,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 "finding": finding.to_dict(),
                 "impact": impact.to_dict(),
                 "root_cause": root_cause.to_dict(),
+                "evidence_bundle": evidence_bundle.to_dict(),
                 "remediation_plan": fallback_plan.to_dict(),
                 "status": "error",
                 "repository_context": body.get("repository_context"),
@@ -960,6 +967,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             "finding": finding.to_dict(),
             "impact": impact.to_dict(),
             "root_cause": root_cause.to_dict(),
+            "evidence_bundle": evidence_bundle.to_dict(),
             "status": result.status.value,
             "run_mode": run_mode,
             "repository_context": body.get("repository_context"),

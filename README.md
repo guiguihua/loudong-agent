@@ -43,6 +43,17 @@ unified diff 应用到隔离的临时工作区，再执行真实命令；报告�
 
 提交示例见 `examples/sast_sql_injection.json`。
 
+## 确定性证据收集
+
+流水线在 Normalize 之后、Impact 之前运行 `EvidenceCollector`。该阶段不调用 LLM，也不修改
+仓库；它一次性从已加载的源码中生成可复用的 `EvidenceBundle`，包含目标文件指纹、有界
+代码切片、路由入口、source/sink 候选、依赖与配置证据、相关测试以及可用验证命令。
+
+Impact、RootCause、Remediation 和 PatchGeneration 会优先消费同一份证据包；只有证据包的
+`collection_warnings` 表明关键上下文缺失时，才继续使用工具补充探索。代码切片有数量和字符
+预算，`.env` 等环境配置只记录键名，值统一脱敏。CLI/API 的任务结果会返回
+`evidence_bundle` 和稳定的 `bundle_hash`，便于审计和复现。
+
 ## 设计原则
 
 - 标准化是确定性数据管道，不由 Agent 自由推理。

@@ -1,6 +1,7 @@
 """Vulnerability intake and impact analysis package."""
 
 from .demos import DEMOS, DemoPreset, get_demo, list_demos
+from .evidence import EvidenceCollector
 from .failure_analysis import FailureAnalysisAgent
 from .impact import ImpactAnalysisAgent
 from .llm import LLMBackend, create_llm_backend
@@ -17,6 +18,7 @@ __all__ = [
     "create_llm_backend",
     "DEMOS",
     "DemoPreset",
+    "EvidenceCollector",
     "FailureAnalysisAgent",
     "ImpactAnalysisAgent",
     "LLMBackend",

@@ -17,6 +17,7 @@ from .models import (
     CodePoint,
     Confidence,
     Evidence,
+    EvidenceBundle,
     FailedControl,
     ImpactAssessment,
     NormalizedVulnerability,
@@ -77,12 +78,13 @@ class RootCauseAnalysisAgent(BaseAgent):
         self,
         finding: NormalizedVulnerability,
         impact: ImpactAssessment,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> RootCauseAssessment:
         """运行 Root Cause Analysis Agent。"""
         from .llm import ROOT_CAUSE_SCHEMA
         self.output_schema = ROOT_CAUSE_SCHEMA
 
-        task = self._build_task(finding, impact)
+        task = self._build_task(finding, impact, evidence_bundle)
         raw = self.run(task)
 
         if "_raw_output" in raw:
@@ -372,8 +374,11 @@ class RootCauseAnalysisAgent(BaseAgent):
         self,
         finding: NormalizedVulnerability,
         impact: ImpactAssessment,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> str:
         """构建根因分析任务。"""
+        from .evidence import format_evidence_bundle
+
         code = self.evidence_tool.collect_code_evidence(finding)
         locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
 
@@ -403,8 +408,11 @@ class RootCauseAnalysisAgent(BaseAgent):
 - 语言: {code.language or 'unknown'}
 - 框架: {code.framework or 'unknown'}
 
+## 确定性 EvidenceBundle（优先使用）
+{format_evidence_bundle(evidence_bundle)}
+
 ## 要求
-请先读相关源码文件，追踪完整的 source-to-sink 数据流。
+先复用 EvidenceBundle 的 source/sink 候选和有界代码切片；仅在关键链路缺失或证据冲突时使用工具补充读取。追踪完整的 source-to-sink 数据流。
 识别缺失的安全控制，给出安全不变量和修复约束。"""
 
     @staticmethod

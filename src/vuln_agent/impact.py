@@ -15,6 +15,7 @@ from .models import (
     AssessmentStatus,
     Confidence,
     Evidence,
+    EvidenceBundle,
     ImpactAssessment,
     NormalizedVulnerability,
 )
@@ -79,12 +80,16 @@ class ImpactAnalysisAgent(BaseAgent):
         self.asset_tool = asset_tool
         self.runtime_tool = runtime_tool
 
-    def analyze(self, finding: NormalizedVulnerability) -> ImpactAssessment:
+    def analyze(
+        self,
+        finding: NormalizedVulnerability,
+        evidence_bundle: EvidenceBundle | None = None,
+    ) -> ImpactAssessment:
         """运行 Impact Analysis Agent。"""
         from .llm import IMPACT_SCHEMA
         self.output_schema = IMPACT_SCHEMA
 
-        task = self._build_task(finding)
+        task = self._build_task(finding, evidence_bundle)
         raw = self.run(task)
 
         if "_raw_output" in raw:
@@ -253,8 +258,14 @@ class ImpactAnalysisAgent(BaseAgent):
         )
         return result
 
-    def _build_task(self, finding: NormalizedVulnerability) -> str:
+    def _build_task(
+        self,
+        finding: NormalizedVulnerability,
+        evidence_bundle: EvidenceBundle | None = None,
+    ) -> str:
         """构建 Agent 任务描述。"""
+        from .evidence import format_evidence_bundle
+
         code = self.code_tool.collect(finding)
         assets = self.asset_tool.collect(finding)
         runtime = self.runtime_tool.collect(finding)
@@ -281,8 +292,11 @@ class ImpactAnalysisAgent(BaseAgent):
 - 资产: {assets.deployed_assets or '未提供'}
 - 运行时路径: {runtime.observed_call_paths or runtime.observed_routes or '未提供'}
 
+## 确定性 EvidenceBundle（优先使用）
+{format_evidence_bundle(evidence_bundle)}
+
 ## 要求
-请先读代码文件确认服务、路由和调用关系，再给出影响面评估。
+先复用 EvidenceBundle 中已收集的文件切片、入口和候选点；只有 collection_warnings 明确指出关键证据缺失时，才使用工具补充探索。
 只报告有证据支持的确认项。由 CVE 通用知识推导、但未在当前仓库确认的下游场景必须放入 unknowns，不能扩写成已确认服务、入口或调用路径。"""
 
     @staticmethod

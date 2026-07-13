@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .failure_analysis import FailureAnalysisAgent
 from .models import (
     EngineeringContext,
+    EvidenceBundle,
     FailureAnalysisResult,
     ImpactAssessment,
     NormalizedVulnerability,
@@ -45,6 +46,7 @@ class PatchRepairLoopOrchestrator:
         repository: RepositoryContext | None = None,
         source_files: list[SourceFile] | None = None,
         validation_tool_results_by_attempt: list[list[ValidationToolResult]] | None = None,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> RepairLoopResult:
         attempts: list[RepairLoopAttempt] = []
         failure_analysis: FailureAnalysisResult | None = None
@@ -58,6 +60,7 @@ class PatchRepairLoopOrchestrator:
                 root_cause,
                 engineering,
                 failure_analysis,
+                evidence_bundle,
             )
             patch_candidate = self.patch_generation_agent.generate(
                 finding,
@@ -67,6 +70,7 @@ class PatchRepairLoopOrchestrator:
                 repository,
                 source_files,
                 previous_attempt,
+                evidence_bundle,
             )
             tool_results = self._tool_results_for_attempt(tool_results_by_attempt, attempt_number)
             validation = self.validation_toolchain.validate(

@@ -417,6 +417,112 @@ class SourceFile:
 
 
 @dataclass(slots=True)
+class RepositorySummary:
+    repository: str | None
+    revision: str | None
+    file_count: int
+    languages: list[str] = field(default_factory=list)
+    frameworks: list[str] = field(default_factory=list)
+    manifests: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class FileEvidence:
+    path: str
+    matched_by: str
+    line_count: int
+    sha256: str
+    language: str | None = None
+
+
+@dataclass(slots=True)
+class CodeSlice:
+    slice_id: str
+    path: str
+    start_line: int
+    end_line: int
+    content: str
+    reason: str
+
+
+@dataclass(slots=True)
+class EntryPointEvidence:
+    route: str
+    method: str
+    path: str
+    line: int
+    framework: str | None = None
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class CodePointEvidence:
+    symbol: str
+    path: str
+    line: int
+    kind: str
+    pattern: str
+    reason: str
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class DependencyEvidence:
+    component: str
+    version: str | None
+    path: str | None
+    line: int | None
+    source: str
+
+
+@dataclass(slots=True)
+class TestEvidence:
+    path: str | None
+    framework: str | None
+    command: str | None
+    related: bool
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class ConfigEvidence:
+    path: str
+    key: str
+    line: int | None
+    value: str
+    source: str
+
+
+@dataclass(slots=True)
+class ValidationCapabilities:
+    build_commands: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    security_commands: list[str] = field(default_factory=list)
+    scanner_commands: list[str] = field(default_factory=list)
+    detected_tools: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class EvidenceBundle:
+    finding_id: str
+    repository_summary: RepositorySummary
+    target_files: list[FileEvidence]
+    code_slices: list[CodeSlice]
+    entry_points: list[EntryPointEvidence]
+    source_candidates: list[CodePointEvidence]
+    sink_candidates: list[CodePointEvidence]
+    dependency_evidence: list[DependencyEvidence]
+    test_evidence: list[TestEvidence]
+    config_evidence: list[ConfigEvidence]
+    validation_capabilities: ValidationCapabilities
+    collection_warnings: list[str]
+    bundle_hash: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class PatchGenerationPolicy:
     mode: str = "diff_only"
     allow_file_create: bool = True

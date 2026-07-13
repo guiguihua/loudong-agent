@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .failure_analysis import FailureAnalysisAgent
+from .evidence import EvidenceCollector
 from .impact import ImpactAnalysisAgent
 from .models import (
     ApiEntryPoint,
@@ -111,6 +112,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     repo = _build_repository(raw, overrides)
     sources = _build_source_files(raw, source_files_data, overrides)
     tool_results = _build_validation_results(raw, overrides)
+    evidence_bundle = EvidenceCollector().collect(finding, sources, repo, eng)
 
     # ── 构建 Agent ──
     code_ctx = _build_code_context(finding, raw, overrides)
@@ -123,7 +125,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         StaticRuntimeEvidenceTool({finding.finding_id: runtime_ctx}),
         llm=llm,
         workspace=workspace,
-    ).analyze(finding)
+    ).analyze(finding, evidence_bundle)
 
     if is_dependency:
         root_cause_ctx = _build_dependency_root_cause(finding, raw, overrides)
@@ -140,7 +142,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         llm=llm,
         workspace=workspace,
     )
-    root_cause_result = rc_agent.analyze(finding, impact)
+    root_cause_result = rc_agent.analyze(finding, impact, evidence_bundle)
 
     # ── 修复循环 ──
     max_attempts = overrides.get("max_attempts", 2)
@@ -161,7 +163,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
 
     result = loop.run(
         finding, impact, root_cause_result,
-        eng, repo, sources, [tool_results],
+        eng, repo, sources, [tool_results], evidence_bundle,
     )
 
     # ── 构建返回字典 ──
@@ -169,6 +171,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         "finding": finding.to_dict(),
         "impact": impact.to_dict(),
         "root_cause": root_cause_result.to_dict(),
+        "evidence_bundle": evidence_bundle.to_dict(),
         "status": result.status.value,
     }
 

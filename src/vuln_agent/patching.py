@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from .agent import BaseAgent, create_default_tools
 from .models import (
     ChangedFile,
+    EvidenceBundle,
     ImpactAssessment,
     NormalizedVulnerability,
     PatchArtifact,
@@ -93,6 +94,7 @@ class PatchGenerationAgent(BaseAgent):
         repository: RepositoryContext | None = None,
         source_files: list[SourceFile] | None = None,
         previous_attempt: PreviousPatchAttempt | None = None,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> PatchCandidate:
         """运行 Patch Generation Agent。"""
         from .llm import PATCH_SCHEMA
@@ -107,7 +109,7 @@ class PatchGenerationAgent(BaseAgent):
 
         task = self._build_task(
             finding, impact, root_cause, remediation_plan,
-            source_files, previous_attempt,
+            source_files, previous_attempt, evidence_bundle,
         )
         # Agent can inspect files and search code, but cannot mutate the source
         # workspace. Candidate execution happens later in an isolated copy.
@@ -559,6 +561,7 @@ class PatchGenerationAgent(BaseAgent):
         remediation_plan: RemediationPlan,
         source_files: list[SourceFile],
         previous_attempt: PreviousPatchAttempt | None,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> str:
         """构建补丁生成任务。
 
@@ -566,6 +569,8 @@ class PatchGenerationAgent(BaseAgent):
         the workspace. Include bounded snippets here so patch generation can
         produce a real diff even when read_file cannot find the file on disk.
         """
+        from .evidence import format_evidence_bundle
+
         source_paths = "\n".join(f"- {sf.path}" for sf in source_files[:20]) if source_files else "（由 Agent 自行探索）"
         source_snippets = PatchGenerationAgent._source_snippets(source_files)
 
@@ -614,10 +619,13 @@ class PatchGenerationAgent(BaseAgent):
 
 ## 关键源码片段
 {source_snippets}
+
+## 确定性 EvidenceBundle（优先使用）
+{format_evidence_bundle(evidence_bundle, max_chars=16000)}
 {prev_text}
 
 ## 要求
-1. 优先基于“关键源码片段”生成补丁；如果片段不足，再用 read_file 读取完整文件
+1. 优先基于 EvidenceBundle 和“关键源码片段”生成补丁；只有片段不足时再用 read_file 读取完整文件
 2. 生成 unified diff 格式补丁（--- a/path / +++ b/path / @@ -L,N +L,N @@）
 3. 只修改必要的最小范围代码
 4. 只输出候选 diff；不要写入源码。构建和安全验证由隔离工作区中的验证器执行"""

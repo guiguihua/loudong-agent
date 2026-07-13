@@ -14,6 +14,7 @@ from .models import (
     CompatibilityAssessment,
     DependencyUpgradePlan,
     EngineeringContext,
+    EvidenceBundle,
     FailureAnalysisResult,
     ImpactAssessment,
     NormalizedVulnerability,
@@ -95,6 +96,7 @@ class RemediationPlanAgent(BaseAgent):
         root_cause: RootCauseAssessment,
         engineering: EngineeringContext | None = None,
         failure_analysis: FailureAnalysisResult | None = None,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> RemediationPlan:
         """运行 Remediation Plan Agent。"""
         from .llm import REMEDIATION_PLAN_SCHEMA
@@ -106,7 +108,9 @@ class RemediationPlanAgent(BaseAgent):
             if static_plan is not None:
                 return static_plan
 
-        task = self._build_task(finding, impact, root_cause, engineering, failure_analysis)
+        task = self._build_task(
+            finding, impact, root_cause, engineering, failure_analysis, evidence_bundle
+        )
         raw = self.run(task)
 
         if "_raw_output" in raw:
@@ -235,7 +239,10 @@ class RemediationPlanAgent(BaseAgent):
         root_cause: RootCauseAssessment,
         engineering: EngineeringContext,
         failure_analysis: FailureAnalysisResult | None,
+        evidence_bundle: EvidenceBundle | None = None,
     ) -> str:
+        from .evidence import format_evidence_bundle
+
         constraints = "\n".join(
             f"- {c}" for c in root_cause.recommended_fix_constraints
         ) if root_cause.recommended_fix_constraints else "无"
@@ -296,8 +303,11 @@ class RemediationPlanAgent(BaseAgent):
 - 框架: {engineering.framework or 'unknown'}
 - 包管理器: {engineering.package_manager or 'unknown'}
 - 测试命令: {engineering.available_test_commands or 'none'}
+
+## 确定性 EvidenceBundle（优先使用）
+{format_evidence_bundle(evidence_bundle, max_chars=16000)}
 {fb}
-请先了解项目结构和读取相关源码，然后选择最优修复策略并给出具体步骤。"""
+优先依据 EvidenceBundle 中已确认的目标文件、代码切片、依赖和测试能力制定方案；只有关键修复证据缺失时才补充探索。选择最优修复策略并给出具体步骤。"""
 
     @staticmethod
     def _static_plan(
