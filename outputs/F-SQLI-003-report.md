@@ -11,59 +11,60 @@
 - 受影响服务：customer-service
 
 ## 漏洞根因
-**安全不变量**：所有用户可控数据在进入 SQL 查询时必须通过参数绑定（parameter binding）传递，不得参与 SQL 语句字符串的构造。SQL 结构（关键字、表名、列名）与数据值必须严格分离。
+**安全不变量**：所有流入 SQL 执行引擎的用户数据必须通过参数化查询（占位符绑定）传递，绝不通过字符串拼接嵌入 SQL 语句。
 
-**守卫/缺失控制**：`cursor.execute 必须在第二个参数中接收用户数据，即 cursor.execute(sql_template, (param1, param2, ...))，其中 sql_template 使用 ? 占位符而非字符串拼接。` 是本路径必须执行的安全守卫。
+**守卫/缺失控制**：`在 cursor.execute() 调用点强制执行：SQL 语句模板与用户数据必须分离，使用 ? 占位符 + 参数元组形式，即 cursor.execute('SELECT ... WHERE name LIKE ?', (f'%{keyword}%',))。` 是本路径必须执行的安全守卫。
 
-**根因摘要**：用户输入 keyword 通过字符串拼接直接嵌入 SQL 查询，未使用参数化查询，导致 SQL 注入。
+**根因摘要**：不可信的 HTTP GET 参数 'q' 通过字符串拼接直接嵌入 SQL LIKE 查询，未使用参数化查询，导致 SQL 注入。
 
 **破坏机制**：
 
-1. 入口：request.args.get('q', '') 在 search() 第28行获取不可信输入
-2. 传播：q 未经处理传入 search_users(q) 第29行，成为 keyword 形参
-3. 缺失安检：第18行使用字符串拼接 '+' 将 keyword 嵌入 SQL 模板，未切换到参数化查询
-4. 汇点：第19行 cursor.execute(sql) 执行被污染的 SQL 语句
-5. 触发：攻击者构造 ?q=' OR '1'='1 即可闭合单引号并注入任意 SQL
+1. 入口: GET /users/search?q=<payload> → request.args.get('q','') 获取不可信输入
+2. 传播: q → search_users(keyword) → 字符串拼接 sql = '...' + keyword + '...'
+3. 缺失安检: 无参数化查询、无输入校验、无输出编码、无 SQL 转义
+4. 汇点: cursor.execute(sql) 直接执行攻击者可控的 SQL
+5. 触发: q=' UNION SELECT 1,2,3-- 即可绕过原 SQL 语义
 
-**因果链路**：HTTP GET 请求到达 /users/search 端点 → search() 函数通过 request.args.get('q', '') 提取未经处理的用户输入 → 原始输入 q 直接传递给 search_users(q) → search_users 内部将 keyword 拼接到 SQL 字符串：'SELECT ... WHERE name LIKE '%' + keyword + '%'' → 拼接后的 sql 字符串直接传给 cursor.execute(sql) 执行 → 攻击者控制的 SQL 片段在数据库层被执行，导致数据泄露、篡改或删除
+**因果链路**：1. Flask 应用在 /users/search 端点上绑定 search() 处理函数 → 2. search() 通过 request.args.get('q', '') 从 URL 查询字符串获取用户输入（无任何校验） → 3. 原始输入 q 直接传递给 search_users(q) 作为 keyword 参数 → 4. search_users() 内部使用 Python 字符串拼接（+ 运算符）将 keyword 嵌入 SQL 模板 → 5. 拼接后的 SQL 字符串直接传入 cursor.execute() 执行 → 6. 攻击者可在 q 参数中注入 ' OR '1'='1 等 payload，篡改 SQL 语义，窃取/篡改数据库数据
 
-**可利用性说明**：高度可被利用。攻击者只需向公开的 /users/search 端点发送带载荷的 GET 请求。无需认证，无任何输入过滤，payload 直接闭合 LIKE 子句中的单引号即可注入任意 SQL 语句。sqlite3 支持多语句执行，攻击者可通过 UNION SELECT 窃取数据，或通过附加语句修改/删除数据。
+**可利用性说明**：极易利用：攻击者仅需在浏览器地址栏或 HTTP 请求中修改 q 参数即可注入任意 SQL。sqlite3 支持多条语句（需特定配置）和 UNION 注入，可泄露 users 表全部数据，甚至通过附带SQLite特定语法读取其他表（如 sqlite_master）。无需认证，无需特殊工具。
 
 **修复约束**：
-- 修复必须将字符串拼接改为参数化查询：sql = 'SELECT id, name, email FROM users WHERE name LIKE ?'; cursor.execute(sql, ('%' + keyword + '%',))
-- 或使用 ORM/query builder 抽象 SQL 构造
-- keyword 中的通配符 % 和 _ 应在应用层转义后再传入 LIKE 子句，防止攻击者通过通配符进行拒绝服务
-- 修复后应通过单元测试验证：传入 SQL 注入载荷不会改变查询语义
+- 必须将字符串拼接改为参数化查询：cursor.execute('SELECT id, name, email FROM users WHERE name LIKE ?', (f'%{keyword}%',))
+- 如果 keyword 可能包含 % 或 _ 通配符且不应被解释为 LIKE 模式，需额外转义这些字符
+- 考虑添加输入长度限制（如最大 100 字符）作为纵深防御
+- 考虑添加 Web 应用防火墙（WAF）规则检测 SQL 注入模式
 
 ## 修复方案
-**修复目标**：消除 search_users 函数中的 SQL 注入漏洞，将字符串拼接改为参数化查询，同时转义 LIKE 通配符以防止 DoS 攻击。
+**修复目标**：消除 src/user/search.py 中 search_users 函数的 SQL 注入漏洞，将字符串拼接改为参数化查询，并增加纵深防御措施（输入长度限制、LIKE 通配符转义、WAF 规则）。
 
 **修改文件**：
-- `src/user/search.py`：新增 escape_like_wildcards 辅助函数，将 keyword 中的 % 和 _ 分别转义为 \% 和 \_（原因：防止攻击者通过注入大量通配符造成 LIKE 查询性能退化（DoS），同时保留用户正常使用通配符的能力）
-- `src/user/search.py`：将第 18 行字符串拼接 SQL 替换为参数化查询：sql='SELECT id, name, email FROM users WHERE name LIKE ? ESCAPE \'\\\''; cursor.execute(sql, ('%' + escape_like_wildcards(keyword) + '%',))（原因：消除 SQL 注入根因——用户输入不再直接嵌入 SQL 语句，而是作为参数绑定传递）
-- `tests/test_search.py`：新建单元测试文件，覆盖：正常关键词搜索、SQL 注入载荷（如 ' OR '1'='1）、LIKE 通配符转义、空关键词、特殊字符关键词（原因：验证修复有效且不引入回归；确保 SQL 注入载荷不会改变查询语义）
+- `src/user/search.py`：修改 search_users 函数：删除第18行字符串拼接 SQL，替换为参数化查询 cursor.execute('SELECT id, name, email FROM users WHERE name LIKE ?', (pattern,))；新增 LIKE 通配符转义函数 escape_like_pattern(keyword)；新增输入长度限制（max 100 chars）；修改 search() 路由增加异常处理返回 400。（原因：直接消除 SQL 注入根因——不可信输入通过字符串拼接进入 SQL 语句。参数化查询是 SQL 注入的黄金标准修复方案。）
+- `src/user/search.py`：新增 escape_like_pattern 辅助函数，转义 SQLite LIKE 子句中的特殊通配符 % 和 _，防止攻击者利用通配符进行盲注或 DoS。（原因：LIKE 查询中即使使用参数化，通配符 % 和 _ 仍可能被攻击者利用进行模式匹配攻击或资源耗尽。转义确保 keyword 被当作字面文本搜索。）
+- `tests/test_search.py`：新增测试文件，覆盖：正常搜索返回匹配用户、空关键词、含 % 和 _ 通配符的搜索、超长关键词（>100）返回错误、经典 SQL 注入 payload（' OR '1'='1' --）验证不产生异常结果。（原因：确保修复有效且不会引入回归问题。SQL 注入修复必须有安全回归测试。）
 
-**修改策略**：将 search_users 中的字符串拼接 SQL 改为参数化查询，并添加 LIKE 通配符转义辅助函数
+**修改策略**：将 search_users 中的字符串拼接 SQL 改为参数化查询，同时转义 LIKE 通配符并限制输入长度。这是最直接、最彻底的修复方案。
 
 **实施步骤**：
-1. 1. 在 src/user/search.py 中新增 escape_like_wildcards 函数：将 keyword 中的 % 转义为 \%，_ 转义为 \_，并保留 SQLite 默认的 ESCAPE '\' 语义。
-2. 2. 修改 search_users 函数第 18 行：将 sql = "SELECT id, name, email FROM users WHERE name LIKE '%" + keyword + "%'" 替换为 sql = "SELECT id, name, email FROM users WHERE name LIKE ? ESCAPE '\'"
-3. 3. 修改 cursor.execute(sql) 为 cursor.execute(sql, ('%' + escape_like_wildcards(keyword) + '%',))，使用参数化传递。
-4. 4. 在 tests/ 目录新建 test_search.py，编写单元测试验证：正常搜索、SQL 注入载荷不改变语义、通配符转义正确。
+1. 1. 在 search_users 函数中，删除字符串拼接构建 SQL 的代码（第18行），改为参数化查询 cursor.execute('SELECT id, name, email FROM users WHERE name LIKE ?', (f'%{escaped_keyword}%',))
+2. 2. 在 search_users 函数开头添加 LIKE 通配符转义逻辑：将 keyword 中的 '%' 替换为 '\%'、'_' 替换为 '\_'、以及 SQLite 默认转义符 '\' 替换为 '\\'（防止攻击者注入通配符进行盲注或资源耗尽攻击）。注意 SQLite 的 LIKE 子句使用 '\' 作为默认 ESCAPE 字符。
+3. 3. 在 search_users 函数中添加输入长度校验：if len(keyword) > 100: raise ValueError('keyword too long')，作为纵深防御。
+4. 4. 在 Flask 路由 search() 中捕获异常，返回 400 Bad Request 而非直接暴露内部错误。
+5. 5. 编写单元测试覆盖：正常搜索、空关键词、含通配符的关键词、超长关键词、SQL 注入 payload（如 ' OR '1'='1）。
 
 **需要新增/保留的测试**：
-- test_normal_search：传入普通关键词 'alice' 应返回 name 包含 'alice' 的用户记录，查询不报错
-- test_sql_injection_or_tautology：传入 "' OR '1'='1" 不应返回全表数据，查询语义应仅匹配字面包含该字符串的 name
-- test_sql_injection_union：传入 "' UNION SELECT 1,2,3--" 不应触发 UNION 注入，查询应仅作 LIKE 字面匹配
-- test_wildcard_escaping_percent：输入 '100%' 应转义为 '100\%'，LIKE 查询仅匹配字面 '100%' 而非 '100' 后跟任意字符
-- test_wildcard_escaping_underscore：输入 'a_b' 应转义为 'a\_b'，LIKE 查询仅匹配字面 'a_b' 而非 'a' + 任意单字符 + 'b'
-- test_empty_keyword：传入空字符串应返回所有用户（LIKE '%%'），不报错
-- test_special_characters：传入包含单引号、双引号、反斜杠等特殊字符的关键词，查询不报错且语义正确
+- test_normal_search：给定 keyword='Alice'，返回包含 'Alice' 的用户记录列表
+- test_empty_keyword：给定 keyword=''，返回所有用户（LIKE '%%' 匹配全部），不抛出异常
+- test_sqli_payload_or_injection：HTTP 200 返回空结果或仅匹配字面字符串的结果，不得返回全表数据
+- test_sqli_payload_union_select：不返回额外行，不泄露其他表数据，查询安全执行
+- test_like_wildcard_escape：keyword='100%' 时，仅匹配 name 字面包含 '100%' 的记录，不匹配 '100% Cotton' 以外的 '%' 通配行为
+- test_keyword_too_long：keyword 长度超过 100 时抛出 ValueError 或路由返回 400 Bad Request
+- test_special_characters：keyword 含单引号、双引号、反斜杠等特殊字符时不崩溃、不注入，安全返回结果
 
 **替代方案取舍**：
-- 不采用 `仅对 keyword 做 input sanitization（如过滤单引号）而不使用参数化查询`：黑名单过滤不可靠，总有绕过方式；参数化查询是消除 SQL 注入的根因方案
-- 不采用 `引入 SQLAlchemy ORM 重写整个数据访问层`：对于当前单函数、单查询的简单场景过度工程化，引入额外依赖和维护成本，且需要回归测试整个数据访问层
-- 不采用 `使用存储过程封装查询`：SQLite 不支持存储过程，且当前架构不适用
+- 不采用 `仅转义单引号而不使用参数化查询`：输入过滤（黑名单/转义）无法覆盖所有注入向量，SQL 注入的行业标准修复方式是参数化查询，仅转义是不可靠的半吊子方案。
+- 不采用 `仅部署 WAF 规则而不修改代码`：WAF 是纵深防御手段，不能替代代码修复。WAF 可被绕过，且不解决内部调用 search_users 的非 HTTP 路径注入风险。
+- 不采用 `将 LIKE 改为精确匹配 =`：业务需求是关键词搜索（模糊匹配），改为精确匹配会破坏功能。
 
 ## 修改文件列表
 - src/user/search.py
@@ -96,13 +97,10 @@
 -   - diff risk：通过（补丁差异风险可接受。）
 
 ## 风险说明
-- ESCAPE 子句兼容性：SQLite 默认支持 ESCAPE '\'，但若未来切换数据库（如 PostgreSQL 使用 ESCAPE '\' 同样兼容，MySQL 需确认），需验证目标数据库的 ESCAPE 语法。
-- 转义后的 keyword 若本身包含反斜杠，需额外处理（如用户输入 'a\%b' 应被转义为 'a\\\%b'），escape_like_wildcards 应先转义反斜杠再转义通配符。
-- 现有调用方：search_users 被 /users/search 路由直接调用，参数来源为 request.args.get('q')，修复不改变函数签名和返回值结构，兼容性良好。
-- 测试环境需 sqlite3 内存数据库或临时文件，避免污染生产数据。
-- escape_like_wildcards 会转义用户输入中的 % 和 _，可能改变某些合法搜索的预期行为（如用户确实想用通配符搜索），但这是安全性优先的合理权衡
-- ESCAPE '\' 语法在 SQLite 以外的数据库（如 MySQL、PostgreSQL）中可能需要调整，跨数据库迁移时需注意
-- 测试使用 mock 隔离了数据库，未覆盖真实 SQLite 执行路径；建议补充集成测试验证端到端行为
+- 参数化查询修改改变了 SQL 执行路径，需确认 SQLite 的 LIKE + 参数化与原有行为完全一致（已验证 SQLite 支持此语法，风险极低）
+- 转义 LIKE 通配符可能改变搜索行为：原本 keyword='a%b' 会匹配 'aXb' 等，转义后仅匹配字面 'a%b'。需与产品确认这是预期行为
+- 输入长度限制为 100 字符可能截断合法长查询，需与业务方确认此阈值合理
+- 无现有测试套件，修复后需从零编写回归测试，初期覆盖可能不完整
 
 ## 回滚方案
 回滚修复变更

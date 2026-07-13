@@ -1,91 +1,174 @@
 {% extends "base.html" %}
-{% block title %}仓库浏览器 — 漏洞修复智能体平台{% endblock %}
+{% block title %}仓库管理 - VulnFix{% endblock %}
 {% block content %}
 
-<h1 class="page-title">📁 仓库浏览器</h1>
-<p class="page-subtitle">克隆 Git 仓库，浏览代码、分支和提交历史</p>
+<h1 class="page-title">代码仓库管理</h1>
+<p class="page-subtitle">提前绑定代码仓库，后续漏洞任务只需要选择仓库和提交版本，不再重复上传完整源码。</p>
 
 <div x-data="repoBrowser()">
   {% if not current_repo %}
-  <!-- Repo list + clone -->
-  <div class="card" style="margin-bottom: 1.5rem;">
-    <h3 style="margin-bottom: 1rem;">🔗 克隆仓库</h3>
-    <div class="flex gap-2">
-      <input type="text" x-ref="cloneUrl" placeholder="https://github.com/user/repo.git"
-             class="form-group" style="flex: 1; margin: 0;">
-      <button class="btn btn-primary" @click="cloneRepo($refs.cloneUrl.value)">
-        🚀 克隆
-      </button>
+  <div class="card mb-2" x-init="loadConfigStatus()">
+    <div class="section-heading"><span>运行配置状态</span></div>
+    <div class="audit-grid">
+      <div class="audit-card">
+        <strong>LLM</strong>
+        <div class="mt-1">
+          <span class="badge" :class="config.llm && config.llm.enabled ? 'badge-success' : 'badge-failed'"
+                x-text="config.llm && config.llm.enabled ? 'enabled' : 'disabled'"></span>
+          <span x-text="config.llm ? config.llm.model : ''"></span>
+        </div>
+      </div>
+      <div class="audit-card">
+        <strong>GitHub PR / 私有仓库</strong>
+        <div class="mt-1">
+          <span class="badge" :class="config.pull_request && config.pull_request.github.enabled ? 'badge-success' : 'badge-low'"
+                x-text="config.pull_request && config.pull_request.github.enabled ? 'token configured' : 'optional token missing'"></span>
+        </div>
+      </div>
+      <div class="audit-card">
+        <strong>GitLab MR / 私有仓库</strong>
+        <div class="mt-1">
+          <span class="badge" :class="config.pull_request && config.pull_request.gitlab.enabled ? 'badge-success' : 'badge-low'"
+                x-text="config.pull_request && config.pull_request.gitlab.enabled ? 'token configured' : 'optional token missing'"></span>
+        </div>
+      </div>
     </div>
-    <p x-show="cloneMsg" x-text="cloneMsg" class="text-muted mt-1"></p>
   </div>
 
-  {% if repos %}
+  <div class="repo-bind-grid mb-2">
+    <div class="card">
+      <h3 class="compact-title">绑定远程 Git 仓库</h3>
+      <div class="form-group">
+        <label>仓库名称</label>
+        <input type="text" x-model="remoteName" placeholder="payment-service">
+      </div>
+      <div class="form-group">
+        <label>Git URL</label>
+        <input type="text" x-model="remoteUrl" placeholder="https://github.com/org/repo.git">
+      </div>
+      <p class="text-muted mb-1">公开仓库或当前机器已有访问权限时不需要 Token；私有仓库、推送分支、创建 PR/MR 时才需要配置 Token。</p>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Provider</label>
+          <select x-model="remoteProvider">
+            <option value="github">GitHub</option>
+            <option value="gitlab">GitLab</option>
+            <option value="enterprise_git">企业 Git</option>
+            <option value="git">通用 Git</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>默认分支</label>
+          <input type="text" x-model="remoteBranch" placeholder="main">
+        </div>
+      </div>
+      <button class="btn btn-primary" @click="cloneRepo">绑定并拉取</button>
+      <p x-show="remoteMsg" x-text="remoteMsg" class="text-muted mt-1"></p>
+    </div>
+
+    <div class="card">
+      <h3 class="compact-title">绑定本地源码目录 / Git 仓库</h3>
+      <div class="form-group">
+        <label>仓库名称</label>
+        <input type="text" x-model="localName" placeholder="local-service">
+      </div>
+      <div class="form-group">
+        <label>本地路径</label>
+        <input type="text" x-model="localPath" placeholder="E:\\projects\\service 或某个源码子目录">
+      </div>
+      <p class="text-muted mb-1">本地绑定不会复制源码。可以绑定普通目录、Git 仓库根目录或仓库子目录；本地源码按文件系统读取，不要求先 commit。</p>
+      <button class="btn btn-secondary" @click="bindLocal">绑定本地目录</button>
+      <p x-show="localMsg" x-text="localMsg" class="text-muted mt-1"></p>
+    </div>
+  </div>
+
   <div class="card">
-    <h3 style="margin-bottom: 1rem;">📚 已克隆仓库</h3>
+    <div class="section-heading"><span>已绑定仓库</span><a href="/new" class="btn btn-sm btn-primary">新建漏洞任务</a></div>
+    {% if repos %}
     <table>
-      <thead><tr><th>仓库</th><th>分支</th><th>URL</th><th>操作</th></tr></thead>
+      <thead>
+        <tr>
+          <th>仓库</th>
+          <th>Provider</th>
+          <th>分支</th>
+          <th>索引</th>
+          <th>权限</th>
+          <th>操作</th>
+        </tr>
+      </thead>
       <tbody>
         {% for r in repos %}
         <tr>
-          <td><strong>{{ r.name }}</strong></td>
-          <td>{{ r.branch }}</td>
-          <td class="text-muted">{{ r.url[:60] }}{% if r.url|length > 60 %}...{% endif %}</td>
-          <td><a href="/repo/{{ r.id }}" class="btn btn-sm btn-secondary">浏览</a></td>
+          <td>
+            <strong>{{ r.name }}</strong>
+            <div class="text-muted">{{ r.url or r.local_path }}</div>
+          </td>
+          <td>{{ r.provider or 'git' }}</td>
+          <td>{{ r.branch or r.default_branch }}</td>
+          <td>
+            {% if r.index_status %}
+            <span class="badge badge-medium">{{ r.index_status.last_indexed_commit }}</span>
+            {% else %}
+            <span class="badge badge-low">not indexed</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="badge badge-success">read</span>
+            <span class="badge badge-low">confirm write</span>
+          </td>
+          <td>
+            <a href="/repo/{{ r.id }}" class="btn btn-sm btn-secondary">浏览</a>
+            <a href="/new?repo_id={{ r.id }}" class="btn btn-sm btn-primary">用于任务</a>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    {% else %}
+    <p class="text-muted">还没有绑定仓库。</p>
+    {% endif %}
   </div>
-  {% else %}
-  <div style="text-align: center; padding: 2rem; color: var(--text2);">
-    <p>还没有克隆任何仓库</p>
-  </div>
-  {% endif %}
 
   {% else %}
-  <!-- Repo browser -->
   <div class="flex gap-2 mb-2">
-    <a href="/repo" class="btn btn-sm btn-secondary">← 返回列表</a>
-    <span style="font-size: 1.1rem; font-weight: 600;">{{ current_repo.name }}</span>
-    <span class="badge badge-medium">{{ current_repo.branch }}</span>
+    <a href="/repo" class="btn btn-sm btn-secondary">返回仓库列表</a>
+    <a href="/new?repo_id={{ repo_id }}" class="btn btn-sm btn-primary">用此仓库创建任务</a>
   </div>
 
-  <div style="display: grid; grid-template-columns: 280px 1fr; gap: 1rem; min-height: 70vh;">
-    <!-- File tree -->
-    <div class="card" style="overflow-y: auto; max-height: 70vh;">
-      <h4 style="margin-bottom: .75rem;">📂 文件</h4>
-      <div class="file-tree" id="file-tree">
-        <p class="text-muted">加载中...</p>
-      </div>
+  <div class="card mb-2">
+    <div class="section-heading">
+      <span>{{ current_repo.name }}</span>
+      <span class="badge badge-low">{{ current_repo.provider }}</span>
+    </div>
+    <div class="repo-meta-lines">
+      <div><span class="text-muted">URL / Path:</span> {{ current_repo.url or current_repo.local_path }}</div>
+      <div><span class="text-muted">Branch:</span> {{ current_repo.branch }}</div>
+      <div><span class="text-muted">Local:</span> {{ current_repo.local_path }}</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:280px 1fr;gap:1rem;min-height:70vh;">
+    <div class="card" style="overflow-y:auto;max-height:70vh;">
+      <h4 class="compact-title">文件</h4>
+      <div class="file-tree" id="file-tree"><p class="text-muted">加载中...</p></div>
     </div>
 
-    <!-- Content area -->
     <div>
-      <!-- File viewer -->
-      <div class="card" style="margin-bottom: 1rem;">
+      <div class="card mb-2">
         <div class="flex-between mb-2">
-          <code id="file-path" style="color: var(--accent2);">选择文件查看</code>
-          <div class="flex gap-2">
-            <select id="branch-select" class="btn btn-sm btn-secondary" style="width: auto;"
-                    onchange="location.search='?branch=' + this.value">
-              {% for b in current_repo.branches %}
-              <option value="{{ b }}" {% if b == current_repo.branch %}selected{% endif %}>{{ b }}</option>
-              {% endfor %}
-            </select>
-          </div>
+          <code id="file-path" style="color:var(--accent2);">选择文件查看</code>
+          <select id="branch-select" class="btn btn-sm btn-secondary" style="width:auto;" onchange="location.search='?branch=' + this.value">
+            {% for b in current_repo.branches %}
+            <option value="{{ b }}" {% if b == current_repo.branch %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+          </select>
         </div>
-        <pre class="diff-view" id="code-viewer" style="min-height: 300px; max-height: 500px;">
-// 选择左侧文件查看代码
-        </pre>
+        <pre class="diff-view" id="code-viewer" style="min-height:300px;max-height:500px;">// 选择左侧文件查看代码</pre>
       </div>
 
-      <!-- Commits -->
       <div class="card">
-        <h4 style="margin-bottom: .75rem;">📝 最近提交</h4>
-        <div id="commits-list">
-          <p class="text-muted">加载中...</p>
-        </div>
+        <h4 class="compact-title">最近提交</h4>
+        <div id="commits-list"><p class="text-muted">加载中...</p></div>
       </div>
     </div>
   </div>
@@ -93,60 +176,93 @@
 </div>
 
 {% endblock %}
+
 {% block scripts %}
 <script>
 function repoBrowser() {
   return {
-    cloneMsg: '',
-    async cloneRepo(url) {
-      if (!url) { this.cloneMsg = '请输入仓库URL'; return; }
-      this.cloneMsg = '克隆中...';
+    remoteName: '',
+    remoteUrl: '',
+    remoteProvider: 'github',
+    remoteBranch: '',
+    remoteMsg: '',
+    localName: '',
+    localPath: '',
+    localMsg: '',
+    config: {},
+
+    async loadConfigStatus() {
+      try {
+        const resp = await fetch('/api/config/status');
+        if (resp.ok) this.config = await resp.json();
+      } catch(e) {
+        this.config = {};
+      }
+    },
+
+    async cloneRepo() {
+      if (!this.remoteUrl) { this.remoteMsg = '请输入 Git URL'; return; }
+      this.remoteMsg = '正在绑定并拉取...';
       try {
         const resp = await fetch('/api/git/clone', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({url: url})
+          body: JSON.stringify({
+            url: this.remoteUrl,
+            name: this.remoteName,
+            provider: this.remoteProvider,
+            default_branch: this.remoteBranch,
+          }),
         });
         const data = await resp.json();
-        if (data.repo_id) {
-          window.location.href = '/repo/' + data.repo_id;
-        } else {
-          this.cloneMsg = '❌ ' + (data.error || '克隆失败');
-        }
+        if (!resp.ok) { this.remoteMsg = data.error || '绑定失败'; return; }
+        window.location.href = '/repo/' + data.repo_id;
       } catch(e) {
-        this.cloneMsg = '❌ ' + e.message;
+        this.remoteMsg = e.message;
       }
-    }
+    },
+
+    async bindLocal() {
+      if (!this.localPath) { this.localMsg = '请输入本地仓库路径'; return; }
+      this.localMsg = '正在绑定...';
+      try {
+        const resp = await fetch('/api/git/bind-local', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ path: this.localPath, name: this.localName }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) { this.localMsg = data.error || '绑定失败'; return; }
+        window.location.href = '/repo/' + data.repo_id;
+      } catch(e) {
+        this.localMsg = e.message;
+      }
+    },
   };
 }
 
 {% if current_repo %}
-// Load file tree
 (async function() {
   const repoId = '{{ repo_id }}';
   const branch = '{{ current_repo.branch }}';
 
-  // Load file tree
   try {
-    const resp = await fetch('/api/git/' + repoId + '/tree?branch=' + branch);
+    const resp = await fetch('/api/git/' + repoId + '/tree?branch=' + encodeURIComponent(branch));
     const tree = await resp.json();
     renderTree(tree, document.getElementById('file-tree'));
   } catch(e) {
     document.getElementById('file-tree').innerHTML = '<p class=text-red>加载失败</p>';
   }
 
-  // Load commits
   try {
-    const resp = await fetch('/api/git/' + repoId + '/commits?branch=' + branch + '&n=20');
+    const resp = await fetch('/api/git/' + repoId + '/commits?branch=' + encodeURIComponent(branch) + '&n=20');
     const commits = await resp.json();
-    let html = '';
-    commits.forEach(c => {
-      html += '<div style="padding:.5rem 0;border-bottom:1px solid var(--border);">' +
-        '<span style="font-family:monospace;color:var(--accent2);">' + c.sha + '</span> ' +
-        '<span>' + c.message + '</span> ' +
-        '<span class=text-muted>' + c.date + '</span></div>';
-    });
-    document.getElementById('commits-list').innerHTML = html || '<p class=text-muted>无提交记录</p>';
+    document.getElementById('commits-list').innerHTML = commits.map(c =>
+      '<div style="padding:.5rem 0;border-bottom:1px solid var(--border);">' +
+      '<span style="font-family:monospace;color:var(--accent2);">' + c.sha + '</span> ' +
+      '<span>' + escapeHtml(c.message) + '</span> ' +
+      '<span class=text-muted>' + c.date + '</span></div>'
+    ).join('') || '<p class=text-muted>暂无提交记录</p>';
   } catch(e) {
     document.getElementById('commits-list').innerHTML = '<p class=text-red>加载失败</p>';
   }
@@ -157,14 +273,15 @@ function renderTree(items, container) {
   items.forEach(item => {
     const div = document.createElement('div');
     div.className = 'tree-item ' + item.type;
-    div.textContent = (item.type === 'dir' ? '📁 ' : '📄 ') + item.name;
+    div.textContent = (item.type === 'dir' ? '[dir] ' : '') + item.name;
     if (item.type === 'file') {
       div.onclick = async () => {
         document.getElementById('file-path').textContent = item.path;
         const resp = await fetch('/api/git/{{ repo_id }}/file?path=' + encodeURIComponent(item.path) + '&branch={{ current_repo.branch }}');
         const data = await resp.json();
-        document.getElementById('code-viewer').textContent = data.content || '';
-        hljs.highlightElement(document.getElementById('code-viewer'));
+        const viewer = document.getElementById('code-viewer');
+        viewer.textContent = data.content || '';
+        hljs.highlightElement(viewer);
       };
     }
     container.appendChild(div);
@@ -175,6 +292,12 @@ function renderTree(items, container) {
       container.appendChild(childDiv);
     }
   });
+}
+
+function escapeHtml(text) {
+  return String(text || '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+  }[ch]));
 }
 {% endif %}
 </script>

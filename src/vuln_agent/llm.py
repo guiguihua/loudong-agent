@@ -16,6 +16,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .config import load_env_file
+
+load_env_file()
+
 
 # ── JSON Schema 构建辅助 ──────────────────────────────────────────────
 

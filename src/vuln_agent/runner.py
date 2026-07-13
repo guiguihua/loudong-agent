@@ -41,7 +41,7 @@ from .tools import (
     StaticRootCauseEvidenceTool,
     StaticRuntimeEvidenceTool,
 )
-from .validation import ValidationToolchain, passed_tool
+from .validation import ValidationToolchain, passed_tool, skipped_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -142,7 +142,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     root_cause_result = rc_agent.analyze(finding, impact)
 
     # ── 修复循环 ──
-    max_attempts = overrides.get("max_attempts", 1)
+    max_attempts = overrides.get("max_attempts", 2)
     loop = PatchRepairLoopOrchestrator(
         remediation_agent=RemediationPlanAgent(llm=llm, workspace=workspace),
         patch_generation_agent=PatchGenerationAgent(PatchGenerationPolicy(), llm=llm, workspace=workspace),
@@ -406,10 +406,12 @@ def _build_validation_results(raw: dict[str, Any], overrides: dict[str, Any]) ->
                 ))
         return results
     from .models import ValidationLayer
+    # 当没有真实验证结果时，标记为 SKIPPED 而非 PASSED。
+    # 真实验证需要外部 CI/CD 系统提供构建/测试/扫描结果。
     return [
-        passed_tool(ValidationLayer.BUILD, "build", "构建验证通过。"),
-        passed_tool(ValidationLayer.BUSINESS_REGRESSION, "business regression", "业务回归测试通过。"),
-        passed_tool(ValidationLayer.SECURITY_REGRESSION, "security regression", "安全回归测试通过。"),
-        passed_tool(ValidationLayer.SCANNER_RESCAN, "scanner rescan", "扫描器复扫不再命中。"),
-        passed_tool(ValidationLayer.DIFFERENTIAL_RISK, "diff risk", "补丁差异风险可接受。"),
+        skipped_tool(ValidationLayer.BUILD, "build", "未提供真实构建输出——需在 CI/CD 中验证。"),
+        skipped_tool(ValidationLayer.BUSINESS_REGRESSION, "business regression", "未提供真实测试输出——需人工验证业务行为不变。"),
+        skipped_tool(ValidationLayer.SECURITY_REGRESSION, "security regression", "未提供真实安全测试——需人工验证漏洞已修复。"),
+        skipped_tool(ValidationLayer.SCANNER_RESCAN, "scanner rescan", "未提供真实扫描输出——需复扫确认漏洞不再命中。"),
+        skipped_tool(ValidationLayer.DIFFERENTIAL_RISK, "diff risk", "未提供真实 diff 审查——需人工审查补丁变更范围。"),
     ]

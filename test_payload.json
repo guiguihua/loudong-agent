@@ -1,0 +1,13 @@
+{
+  "finding_id": "F-TEST-001",
+  "vulnerability_type": "SQL Injection",
+  "severity": "high",
+  "affected_file": "src/user/search.py",
+  "affected_function": "search_users",
+  "line": 14,
+  "evidence": "user input concatenated into SQL query",
+  "scanner": "SAST",
+  "source_dir": "example_usage",
+  "language": "Python",
+  "framework": "Flask"
+}

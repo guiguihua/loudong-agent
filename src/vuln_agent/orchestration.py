@@ -8,6 +8,7 @@ from .models import (
     FailureAnalysisResult,
     ImpactAssessment,
     NormalizedVulnerability,
+    PatchCandidateStatus,
     PatchValidationStatus,
     PreviousPatchAttempt,
     RemediationPlan,
@@ -97,6 +98,32 @@ class PatchRepairLoopOrchestrator:
                     final_report=report,
                     final_failure_analysis=None,
                     next_action="send_to_human_review_and_pr_creation",
+                    needs_human_review=True,
+                )
+
+            if patch_candidate.status == PatchCandidateStatus.BLOCKED:
+                report = self.report_agent.generate(
+                    finding,
+                    impact,
+                    root_cause,
+                    remediation_plan,
+                    patch_candidate,
+                    validation,
+                )
+                attempts.append(RepairLoopAttempt(
+                    attempt=attempt_number,
+                    remediation_plan=remediation_plan,
+                    patch_candidate=patch_candidate,
+                    validation=validation,
+                    failure_analysis=None,
+                ))
+                return RepairLoopResult(
+                    finding_id=finding.finding_id,
+                    status=RepairLoopStatus.BLOCKED,
+                    attempts=attempts,
+                    final_report=report,
+                    final_failure_analysis=None,
+                    next_action="patch_generation_needs_deep_mode_or_human_patch",
                     needs_human_review=True,
                 )
 

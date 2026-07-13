@@ -48,10 +48,11 @@ class TaskInfo:
 
 
 class TaskManager:
-    """内存中的任务管理器 + JSON 历史持久化。"""
+    """内存中的任务管理器 + JSON 历史持久化（线程安全）。"""
 
     def __init__(self):
         self._tasks: dict[str, TaskInfo] = {}
+        self._lock = __import__("threading").Lock()
         self._load_history()
 
     # ── CRUD ──
@@ -59,36 +60,45 @@ class TaskManager:
     def create(self, vuln_type: str = "", severity: str = "") -> TaskInfo:
         task_id = self._generate_id(vuln_type, severity)
         info = TaskInfo(task_id=task_id, vuln_type=vuln_type, severity=severity)
-        self._tasks[task_id] = info
+        with self._lock:
+            self._tasks[task_id] = info
         return info
 
     def get(self, task_id: str) -> TaskInfo | None:
-        return self._tasks.get(task_id)
+        with self._lock:
+            return self._tasks.get(task_id)
 
     def update(self, task_id: str, **kwargs: Any) -> TaskInfo | None:
-        info = self._tasks.get(task_id)
-        if info is None:
-            return None
-        for k, v in kwargs.items():
-            if hasattr(info, k):
-                setattr(info, k, v)
+        with self._lock:
+            info = self._tasks.get(task_id)
+            if info is None:
+                return None
+            for k, v in kwargs.items():
+                if hasattr(info, k):
+                    setattr(info, k, v)
+            if kwargs.get("status") in ("succeeded", "failed"):
+                info.finished_at = time.time()
+        # 持久化在锁外进行（避免 I/O 阻塞锁）
         if kwargs.get("status") in ("succeeded", "failed"):
-            info.finished_at = time.time()
             self._persist_task(info)
         return info
 
     def list_recent(self, n: int = 20) -> list[TaskInfo]:
-        tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+        with self._lock:
+            tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
         return tasks[:n]
 
     def list_all(self) -> list[TaskInfo]:
-        return sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+        with self._lock:
+            tasks = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)
+        return tasks
 
     def stats(self) -> dict[str, int]:
-        total = len(self._tasks)
-        succeeded = sum(1 for t in self._tasks.values() if t.status == "succeeded")
-        failed = sum(1 for t in self._tasks.values() if t.status == "failed")
-        pending = total - succeeded - failed
+        with self._lock:
+            total = len(self._tasks)
+            succeeded = sum(1 for t in self._tasks.values() if t.status == "succeeded")
+            failed = sum(1 for t in self._tasks.values() if t.status == "failed")
+            pending = total - succeeded - failed
         return {"total": total, "succeeded": succeeded, "failed": failed, "pending": pending}
 
     # ── Private ──

@@ -88,13 +88,31 @@ class BaseAgent:
 
         messages = self._build_initial_messages(task, context or {})
 
-        for turn in range(1, self.max_turns + 1):
-            response = self._call_llm(messages)
+        # 构建本轮的全部工具（含 submit_final_result）
+        active_tools = list(self.tools)
+        if self.output_schema:
+            active_tools.append(_make_submit_result_tool(self.output_schema))
 
-            # 有工具调用 → 执行并继续循环
+        for turn in range(1, self.max_turns + 1):
+            response = self._call_llm(messages, active_tools)
+
+            # 有工具调用 → 先检查是否调用了 submit_final_result
             if response.tool_calls:
+                # 检查是否调用了 submit_final_result（优先处理）
+                for tc in response.tool_calls:
+                    func_name = tc.get("function", {}).get("name", "")
+                    if func_name == "submit_final_result":
+                        args_str = tc.get("function", {}).get("arguments", "{}")
+                        try:
+                            return json.loads(args_str) if isinstance(args_str, str) else args_str
+                        except json.JSONDecodeError:
+                            # JSON 解析失败，回退到文本解析
+                            _safe_print(f"  [{self.name}] [WARN] submit_final_result JSON 解析失败，尝试从文本提取")
+                            # 把 args_str 当文本内容处理
+                            return self._parse_final_output(str(args_str))
+
                 # 1. 先添加 assistant 消息（含 tool_calls）
-                assistant_msg = {
+                assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": response.content,
                     "tool_calls": response.tool_calls,
@@ -110,10 +128,47 @@ class BaseAgent:
             # 无工具调用 → Agent 完成，解析输出
             return self._parse_final_output(response.content or "")
 
-        # 超过 max_turns
+        # 超过 max_turns — 多级回退策略
+        _safe_print(f"  [{self.name}] [WARN] 达 max_turns={self.max_turns}，尝试回退策略...")
+
+        # 回退 1：追加强制输出指令，不带工具再试一次
+        force_msg = (
+            "你已达到最大推理轮数限制。现在**必须立即**输出最终 JSON 分析结果。\n"
+            "不要再调用任何工具！直接在文本中输出完整的 JSON 对象。"
+        )
+        messages.append({"role": "user", "content": force_msg})
+        try:
+            final_response = self._call_llm(messages, tools=None)
+            if final_response.content:
+                result = self._parse_final_output(final_response.content)
+                if "_raw_output" not in result:
+                    _safe_print(f"  [{self.name}] 回退成功（第1级）")
+                    return result
+        except Exception:
+            pass
+
+        # 回退 2：用纯净上下文重新调用（避免被历史 tool_calls 污染）
+        _safe_print(f"  [{self.name}] [WARN] 回退1失败，尝试纯净上下文...")
+        try:
+            clean_messages: list[dict[str, Any]] = [
+                {"role": "system", "content": self.system_prompt + "\n\n你现在必须立即输出最终 JSON 分析结果。不要再调用工具，不要输出其他内容。"},
+                {"role": "user", "content": task + "\n\n请立即输出完整的 JSON 结果。"},
+            ]
+            final_response = self._call_llm(clean_messages, tools=None)
+            if final_response.content:
+                result = self._parse_final_output(final_response.content)
+                if "_raw_output" not in result:
+                    _safe_print(f"  [{self.name}] 回退成功（第2级-纯净上下文）")
+                    return result
+                # 即使只有 raw_output 也返回
+                _safe_print(f"  [{self.name}] 回退2获得非结构化文本，按 raw_output 返回")
+                return result
+        except Exception:
+            pass
+
         raise RuntimeError(
             f"Agent '{self.name}' 超过最大推理轮数 {self.max_turns}，"
-            f"仍未给出最终答案"
+            f"所有回退策略均失败"
         )
 
     # ── 内部方法 ────────────────────────────────────────────────────────
@@ -126,8 +181,11 @@ class BaseAgent:
         if self.output_schema:
             schema_str = json.dumps(self.output_schema, ensure_ascii=False, indent=2)
             system += (
-                f"\n\n最终输出必须是 JSON 格式，符合以下 Schema：\n```json\n{schema_str}\n```\n"
-                "当你收集到足够信息后，直接输出 JSON，不要再调用工具。"
+                f"\n\n## 输出格式\n"
+                f"你的最终输出必须符合以下 JSON Schema：\n```json\n{schema_str}\n```\n"
+                f"**重要**：当你收集到足够信息、完成全部分析后，"
+                f"必须调用 `submit_final_result` 工具来提交最终结果。"
+                f"不要直接在文本中输出 JSON — 务必通过 submit_final_result 工具提交。"
             )
 
         # 添加工件目录信息
@@ -139,9 +197,22 @@ class BaseAgent:
         ]
         return messages
 
-    def _call_llm(self, messages: list[dict[str, Any]]) -> ChatResponse:
-        """调用 LLM（支持工具）。"""
-        tool_schemas = [t.to_openai_schema() for t in self.tools] if self.tools else None
+    def _call_llm(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Tool] | None = None,
+    ) -> ChatResponse:
+        """调用 LLM（支持工具）。
+
+        Args:
+            messages: 对话历史
+            tools: 本轮可用的工具列表。为 None 时不传工具（强制 LLM 输出文本）。
+                   传入空列表 [] 也不传工具。
+        """
+        if tools:
+            tool_schemas = [t.to_openai_schema() for t in tools]
+        else:
+            tool_schemas = None
         return self.llm.chat(messages, tools=tool_schemas)  # type: ignore[union-attr]
 
     def _handle_tool_call(self, tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -162,10 +233,10 @@ class BaseAgent:
         else:
             try:
                 result = tool.handler(**func_args)
-                print(f"  [{self.name}] 🔧 {func_name}({_brief_args(func_args)}) → {_brief_result(result)}")
+                _safe_print(f"  [{self.name}] [TOOL] {func_name}({_brief_args(func_args)}) -> {_brief_result(result)}")
             except Exception as exc:
                 result = f"工具执行失败: {exc}"
-                print(f"  [{self.name}] ❌ {func_name}({_brief_args(func_args)}) → {exc}")
+                _safe_print(f"  [{self.name}] [ERR] {func_name}({_brief_args(func_args)}) -> {exc}")
 
         return {
             "role": "tool",
@@ -369,6 +440,7 @@ def _make_run_shell(workspace: Path) -> Tool:
         try:
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=60, cwd=str(workspace),
             )
         except subprocess.TimeoutExpired:
@@ -416,7 +488,42 @@ def create_default_tools(
     return tools
 
 
+# ── submit_final_result 工具 ─────────────────────────────────────────────
+
+
+def _make_submit_result_tool(output_schema: dict[str, Any]) -> Tool:
+    """根据 output_schema 创建 submit_final_result 工具。
+
+    Agent 调用此工具提交最终结果，参数即为 output_schema 的 properties。
+    这样 LLM 通过工具调用机制（而非文本输出）来提交结构化结果，
+    避免思考模型在"探索工具"和"输出 JSON"之间犹豫不决。
+    """
+
+    def _handler(**kwargs: Any) -> str:
+        return json.dumps(kwargs, ensure_ascii=False)
+
+    return Tool(
+        name="submit_final_result",
+        description=(
+            "提交最终分析结果。当你收集到足够信息、完成全部分析后，"
+            "调用此工具提交完整的结构化 JSON 结果。调用后分析立即结束。"
+        ),
+        parameters=output_schema.get("properties", {}),
+        required=output_schema.get("required", []),
+        handler=_handler,
+    )
+
+
 # ── 辅助函数 ────────────────────────────────────────────────────────────
+
+
+def _safe_print(msg: str) -> None:
+    """安全打印 — 处理 Windows GBK 编码无法输出 emoji 的问题。"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # 移除无法编码的字符后重试
+        print(msg.encode("gbk", errors="replace").decode("gbk", errors="replace"))
 
 
 def _resolve_path(workspace: Path, path: str) -> Path:

@@ -44,7 +44,7 @@ IMPACT_AGENT_PROMPT = """你是一位应用安全工程师，负责分析安全�
 3. 追踪调用链，理解数据如何流动
 4. 最后给出完整的 JSON 格式影响面评估
 
-在确认收集到足够信息后，直接输出 JSON 结果，不要再调用工具。"""
+在确认收集到足够信息后，调用 submit_final_result 工具提交最终结果。"""
 
 
 class ImpactAnalysisAgent(BaseAgent):
@@ -64,7 +64,7 @@ class ImpactAnalysisAgent(BaseAgent):
             system_prompt=IMPACT_AGENT_PROMPT,
             tools=create_default_tools(ws),
             llm=llm,
-            max_turns=10,
+            max_turns=15,
             workspace=ws,
         )
         self.code_tool = code_tool
@@ -80,8 +80,170 @@ class ImpactAnalysisAgent(BaseAgent):
         raw = self.run(task)
 
         if "_raw_output" in raw:
-            return self._dict_to_assessment(finding, {"reasoning": raw["_raw_output"]})
+            extracted = self._extract_impact_from_raw(raw["_raw_output"], finding)
+            return self._dict_to_assessment(finding, extracted)
         return self._dict_to_assessment(finding, raw)
+
+    def _extract_impact_from_raw(
+        self,
+        raw_text: str,
+        finding: NormalizedVulnerability,
+    ) -> dict:
+        """从非结构化的影响面分析文本中二次提取结构化字段。"""
+        if not self.llm:
+            return ImpactAnalysisAgent._fallback_impact_extraction(raw_text, finding)
+
+        from .llm import IMPACT_SCHEMA
+
+        locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
+        extraction_prompt = f"""以下是一段漏洞影响面分析的原始文本。请从中提取关键信息，填入指定 JSON 结构。
+
+## 漏洞基本信息
+- ID: {finding.finding_id}
+- 类型: {finding.vulnerability_type}
+- 文件: {', '.join(locs) if locs else 'unknown'}
+- 证据: {'; '.join(finding.evidence) if finding.evidence else '无'}
+
+## 原始分析文本
+{raw_text[:8000]}
+
+## 要求
+请仔细阅读上面的分析文本，尽量提取所有你能找到的结构化信息。
+如果某个字段在文本中找不到对应信息，使用合理的默认值（空数组/unknown），不要编造。"""
+
+        try:
+            structured = self.llm.reason(
+                user_prompt=extraction_prompt,
+                system_prompt="你是一个结构化数据提取器。从安全分析文本中提取影响面信息并填入 JSON。只输出 JSON。",
+                output_schema={
+                    "type": "object",
+                    "description": "从原始分析文本中提取的影响面评估",
+                    "properties": {
+                        k: v for k, v in IMPACT_SCHEMA.get("properties", {}).items()
+                        if k not in ("reasoning",)
+                    },
+                    "required": ["status", "affected_services", "entry_points", "call_paths", "unknowns", "confidence_score", "needs_human_review"],
+                },
+                temperature=0.1,
+            )
+            if isinstance(structured, dict) and structured.get("affected_services"):
+                return structured
+        except Exception:
+            pass
+
+        return ImpactAnalysisAgent._fallback_impact_extraction(raw_text, finding)
+
+    @staticmethod
+    def _fallback_impact_extraction(raw_text: str, finding: NormalizedVulnerability) -> dict:
+        """LLM 不可用时的纯文本回退 — 从分析文本和漏洞报告中提取影响面信息。"""
+        import re
+
+        result: dict = {
+            "status": "possible",
+            "affected_services": [],
+            "entry_points": [],
+            "call_paths": [],
+            "affected_assets": [],
+            "affected_artifacts": [],
+            "data_classification": [],
+            "upstream_dependencies": [],
+            "downstream_dependencies": [],
+            "regression_targets": [],
+            "suggested_tests": [],
+            "unknowns": [],
+            "confidence_score": 0.3,
+            "needs_human_review": True,
+            "reasoning": "",
+        }
+
+        # 1. Try to find JSON block
+        json_match = re.search(r'\{[^{}]*"affected_services"[^{}]*\}', raw_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'\{[^{}]*"entry_points"[^{}]*\}', raw_text, re.DOTALL)
+        if json_match:
+            import json as _json
+            try:
+                parsed = _json.loads(json_match.group(0))
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if k in result and v:
+                            result[k] = v
+            except (_json.JSONDecodeError, ValueError):
+                pass
+
+        # 2. Extract affected services from text patterns
+        service_patterns = [
+            r'(?:受影响|影响)\s*(?:服务|组件|系统)[：:\s]*(.+?)(?:\n|$)',
+            r'(?:affected.service|impacted.service)[：:\s]*(.+?)(?:\n|$)',
+        ]
+        for pat in service_patterns:
+            match = re.search(pat, raw_text, re.IGNORECASE)
+            if match and not result.get("affected_services"):
+                services = [s.strip() for s in re.split(r'[,，、]', match.group(1)) if s.strip()]
+                result["affected_services"] = services[:10]
+                break
+
+        # 3. Build meaningful fallback from finding data
+        locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
+        evidence_text = "; ".join(e for e in (finding.evidence or []) if e.strip())
+
+        if not result["affected_services"]:
+            # Infer from vulnerability context
+            if finding.repository:
+                result["affected_services"] = [finding.repository]
+            elif finding.dependency:
+                result["affected_services"] = [
+                    f"所有使用 {finding.dependency.component} 的下游应用和服务"
+                ]
+            elif locs:
+                result["affected_services"] = [
+                    f"{finding.vulnerability_type} 相关的认证/授权服务",
+                    f"受影响文件: {', '.join(locs[:3])}"
+                ]
+            else:
+                result["affected_services"] = [
+                    f"受 {finding.vulnerability_type} 影响的服务组件（需人工确认具体范围）"
+                ]
+
+        if not result["entry_points"] and locs:
+            result["entry_points"] = [
+                {
+                    "route": f"{finding.vulnerability_type} 触发入口",
+                    "method": "ANY",
+                    "authentication": "unknown",
+                    "internet_exposed": None,
+                }
+            ]
+
+        if not result["call_paths"] and locs:
+            func = finding.locations[0].function if finding.locations and finding.locations[0].function else "unknown"
+            result["call_paths"] = [[
+                f"外部输入/请求",
+                f"{func} @ {locs[0]}",
+                f"{finding.vulnerability_type} 危险操作"
+            ]]
+
+        if not result["data_classification"] and evidence_text:
+            result["data_classification"] = [f"受影响数据（证据: {evidence_text[:100]}）"]
+
+        if not result["regression_targets"]:
+            result["regression_targets"] = [
+                f"{finding.vulnerability_type} 安全回归",
+                "认证/授权行为回归",
+            ]
+
+        if not result["suggested_tests"]:
+            result["suggested_tests"] = [
+                f"验证 {finding.vulnerability_type} 的利用条件在修复后是否被阻断",
+                "验证正常认证流程不受影响",
+            ]
+
+        result["reasoning"] = (
+            f"影响面分析从非结构化文本中尽力提取。"
+            f"漏洞类型: {finding.vulnerability_type}。"
+            f"{' 证据: ' + evidence_text[:200] if evidence_text else ''}"
+        )
+        return result
 
     def _build_task(self, finding: NormalizedVulnerability) -> str:
         """构建 Agent 任务描述。"""

@@ -1,0 +1,25 @@
+{
+  "e4e97c598824": {
+    "id": "e4e97c598824",
+    "name": "authentication",
+    "provider": "local",
+    "url": "https://github.com/guiguihua/loudong-agent.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\authentication",
+    "git_root": "E:\\damoxingdaima\\loudong-agent",
+    "default_branch": "master",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "3ee55aa95521",
+      "last_indexed_at": "2026-07-10 10:52",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  }
+}

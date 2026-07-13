@@ -28,6 +28,26 @@
 
   <!-- Results (shown on completion) -->
   <div x-show="!loading && result" style="display: none;">
+    <!-- Repository context -->
+    <div class="card" style="margin-bottom: 1rem;">
+      <div class="section-heading"><span>代码仓库</span></div>
+      <div class="audit-grid">
+        <div class="audit-card">
+          <strong>代码仓库</strong>
+          <template x-if="result.repository_context">
+            <div class="mt-1">
+              <div x-text="result.repository_context.name || result.repository_context.repo_id"></div>
+              <div class="text-muted" x-text="(result.repository_context.provider || 'git') + ' / ' + (result.repository_context.branch || 'HEAD')"></div>
+              <div class="text-muted" x-text="'源码文件: ' + (result.repository_context.source_file_count || 0)"></div>
+            </div>
+          </template>
+          <template x-if="!result.repository_context">
+            <p class="text-muted mt-1">本任务未绑定长期仓库，使用临时源码输入。</p>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- Impact -->
     <div class="card" style="margin-bottom: 1rem;" x-data="{ open: false }">
       <div class="collapse-header" @click="open = !open">
@@ -47,6 +67,17 @@
       </div>
       <div class="collapse-content" :class="{ open: open }">
         <div x-html="renderResultSection('root_cause')"></div>
+      </div>
+    </div>
+
+    <!-- Remediation Plan -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: true }">
+      <div class="collapse-header" @click="open = !open">
+        修复建议
+        <span x-text="open ? '收起' : '展开'">收起</span>
+      </div>
+      <div class="collapse-content open" :class="{ open: open }">
+        <div x-html="renderResultSection('remediation_plan')"></div>
       </div>
     </div>
 

@@ -51,6 +51,44 @@ body {
 .stat-card .stat-value { font-size: 2rem; font-weight: 700; color: var(--accent2); }
 .stat-card .stat-label { font-size: .8rem; color: var(--text2); margin-top: .25rem; }
 
+.section-heading {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; margin-bottom: 1rem; font-weight: 700;
+}
+.compact-title { margin-bottom: 1rem; font-size: 1rem; }
+.repo-bind-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.repo-summary {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1rem; margin-top: .5rem;
+}
+.repo-meta { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .75rem; }
+.repo-meta-lines { display: grid; gap: .35rem; font-size: .875rem; }
+.fallback-source {
+  margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);
+}
+.policy-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem; margin-bottom: 1rem;
+}
+.policy-grid label, .skill-chip {
+  display: flex; align-items: center; gap: .5rem;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: .65rem .75rem; font-size: .85rem;
+}
+.policy-grid input, .skill-chip input { width: auto; }
+.skill-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .75rem;
+}
+.audit-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .75rem; margin-top: 1rem;
+}
+.audit-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: .75rem;
+}
+
 /* ── Forms ── */
 .form-group { margin-bottom: 1rem; }
 .form-group label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: .35rem; color: var(--text2); }
@@ -196,3 +234,10 @@ tr:hover { background: var(--surface2); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hidden { display: none; }
+
+@media (max-width: 900px) {
+  .repo-bind-grid, .policy-grid, .skill-grid, .audit-grid, .form-row {
+    grid-template-columns: 1fr;
+  }
+  .main-content { padding: 1rem; }
+}

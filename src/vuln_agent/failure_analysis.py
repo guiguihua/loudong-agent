@@ -44,10 +44,11 @@ FAILURE_AGENT_PROMPT = """你是一位 CI/CD 安全验证专家，负责诊断�
 
 ## 工作方式
 1. 分析每层验证失败的具体原因
-2. 尽可能运行相关命令复现问题
+2. 必要时用 run_shell 复现问题（控制在 3 次以内）
 3. 给出具体可执行的修复建议
+4. 分析完成后**必须立即**调用 submit_final_result 提交诊断结果
 
-确认诊断完毕后，直接输出 JSON 结果。"""
+确认诊断完毕后，调用 submit_final_result 工具提交最终结果。"""
 
 
 class FailureAnalysisAgent(BaseAgent):
@@ -64,7 +65,7 @@ class FailureAnalysisAgent(BaseAgent):
             system_prompt=FAILURE_AGENT_PROMPT,
             tools=create_default_tools(ws, include_shell=True),
             llm=llm,
-            max_turns=8,
+            max_turns=12,
             workspace=ws,
         )
 

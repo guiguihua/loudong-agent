@@ -59,12 +59,14 @@ class RemediationReportAgent:
             f"候选补丁 {patch_candidate.patch_id} 已针对 {finding.vulnerability_type} 完成修复，"
             "并通过构建、业务回归、安全回归、扫描复验和差异风险验证。"
         )
-        root_cause_summary = self._root_cause_summary(root_cause, remediation_plan)
-        remediation_summary = self._remediation_summary(remediation_plan)
+        root_cause_summary = self._root_cause_summary(finding, root_cause, remediation_plan)
+        remediation_summary = self._remediation_summary(finding, remediation_plan)
+        impact_summary = self._impact_summary(finding, impact)
         rollback_summary = self._rollback_summary(remediation_plan)
         human_review_focus = self._human_review_focus(finding, impact, remediation_plan, patch_candidate)
         sections = [
             ReportSection("修改摘要", executive),
+            ReportSection("影响面", impact_summary),
             ReportSection("漏洞根因", root_cause_summary),
             ReportSection("修复方案", remediation_summary),
             ReportSection("修改文件列表", "\n".join(f"- {file}" for file in changed_files)),
@@ -82,6 +84,7 @@ class RemediationReportAgent:
             remediation_plan,
             root_cause_summary,
             remediation_summary,
+            impact_summary,
             rollback_summary,
             changed_files,
             test_results,
@@ -164,7 +167,11 @@ class RemediationReportAgent:
         return list(dict.fromkeys(file for file in files if file))
 
     @staticmethod
-    def _root_cause_summary(root_cause: RootCauseAssessment, remediation_plan: RemediationPlan) -> str:
+    def _root_cause_summary(
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+        remediation_plan: RemediationPlan,
+    ) -> str:
         upgrade = remediation_plan.dependency_upgrade
         if upgrade:
             return (
@@ -175,27 +182,100 @@ class RemediationReportAgent:
                 "并通过依赖兼容性、业务回归和扫描复验。"
             )
 
+        rc = root_cause.root_cause
+        is_placeholder_summary = RemediationReportAgent._is_placeholder_summary(rc.summary)
+
         lines = []
         if root_cause.security_invariant:
             lines.append(f"**安全不变量**：{root_cause.security_invariant}")
         if root_cause.guardrail:
             lines.append(f"**守卫/缺失控制**：`{root_cause.guardrail}` 是本路径必须执行的安全守卫。")
-        lines.append(f"**根因摘要**：{root_cause.root_cause.summary}")
-        if root_cause.broken_mechanism:
-            mechanism = "\n".join(f"{index}. {item}" for index, item in enumerate(root_cause.broken_mechanism, 1))
-            lines.append(f"**破坏机制**：\n\n{mechanism}")
-        if root_cause.causal_chain:
-            chain = " → ".join(root_cause.causal_chain)
-            lines.append(f"**因果链路**：{chain}")
-        if root_cause.exploitability_note:
-            lines.append(f"**可利用性说明**：{root_cause.exploitability_note}")
+
+        if is_placeholder_summary:
+            # 根因分析未产出有效结构化结果 → 生成有意义的降级内容
+            lines.append(RemediationReportAgent._build_fallback_root_cause(finding, root_cause))
+        else:
+            lines.append(f"**根因摘要**：{rc.summary}")
+            if root_cause.broken_mechanism:
+                mechanism = "\n".join(
+                    f"{index}. {item}"
+                    for index, item in enumerate(root_cause.broken_mechanism, 1)
+                )
+                lines.append(f"**破坏机制**：\n\n{mechanism}")
+            if root_cause.causal_chain:
+                chain = " → ".join(root_cause.causal_chain)
+                lines.append(f"**因果链路**：{chain}")
+            if root_cause.exploitability_note:
+                lines.append(f"**可利用性说明**：{root_cause.exploitability_note}")
+
         if root_cause.recommended_fix_constraints:
             constraints = "\n".join(f"- {item}" for item in root_cause.recommended_fix_constraints)
             lines.append(f"**修复约束**：\n{constraints}")
         return "\n\n".join(lines)
 
     @staticmethod
-    def _remediation_summary(remediation_plan: RemediationPlan) -> str:
+    def _is_placeholder_summary(summary: str | None) -> bool:
+        """判断根因摘要是否为占位符文本（LLM 未产出有效分析）。"""
+        if not summary:
+            return True
+        summary_lower = summary.lower().strip()
+        placeholder_markers = [
+            "static fallback could not fully confirm",
+            "could not fully confirm root cause",
+            "manual review is required",
+            "could not fully confirm",
+            "fast mode uses a generic",
+            "无法完全确认",
+            "需人工审查",
+        ]
+        return any(marker in summary_lower for marker in placeholder_markers)
+
+    @staticmethod
+    def _build_fallback_root_cause(
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+    ) -> str:
+        """当根因分析为占位符时，基于漏洞报告本身构建有意义的根因描述。"""
+        vuln_type = finding.vulnerability_type or "未知漏洞类型"
+        severity = finding.severity.value if finding.severity else "unknown"
+        cwe = f" ({finding.cwe})" if finding.cwe else ""
+        evidence = "; ".join(e for e in (finding.evidence or []) if e.strip())
+        recommendation = finding.recommendation or ""
+        locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
+        affected_loc = locs[0] if locs else "unknown"
+
+        parts = [
+            f"**根因摘要**：{finding.finding_id} — {vuln_type}{cwe}，严重性 {severity}。"
+            f"漏洞位于 `{affected_loc}`。"
+            f"{' 证据: ' + evidence if evidence else ''}"
+            f"{' 修复建议: ' + recommendation if recommendation else ''}",
+            "",
+            "**⚠️ 重要提示**：LLM 根因分析 Agent 未产出完整的结构化分析结果。"
+            "以下信息基于漏洞报告中的原始数据推断，而非代码级数据流追踪。",
+        ]
+
+        if root_cause.root_cause.missing_control and str(root_cause.root_cause.missing_control).strip().lower() not in (
+            "missing_control", "missing_security_control", "missing control", "",
+        ):
+            parts.append(f"**可能缺失的控制**：{root_cause.root_cause.missing_control}")
+
+        if locs:
+            parts.append(f"**受影响位置**：{', '.join(locs)}")
+
+        parts.extend([
+            "",
+            "**建议操作**：",
+            "- 人工审查受影响代码的 source-to-sink 数据流",
+            f"- 确认 {vuln_type} 的具体触发条件和利用路径",
+            "- 验证补丁是否在正确的位置施加了正确的安全控制",
+        ])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _remediation_summary(
+        finding: NormalizedVulnerability,
+        remediation_plan: RemediationPlan,
+    ) -> str:
         upgrade = remediation_plan.dependency_upgrade
         if upgrade:
             recommended = (
@@ -210,23 +290,37 @@ class RemediationReportAgent:
             )
 
         strategy = remediation_plan.strategies[0] if remediation_plan.strategies else None
+        goal = remediation_plan.remediation_goal or f"修复 {finding.vulnerability_type or '未知漏洞'}"
+
         changes = "\n".join(
             f"- `{item.file}`：{item.description}（原因：{item.reason}）"
             for item in remediation_plan.planned_changes
-        ) or "- 暂无代码修改项"
-        steps = "\n".join(f"{index}. {step}" for index, step in enumerate(strategy.steps, 1)) if strategy else "1. 按根因补齐缺失安全控制"
+        ) or "- 暂无代码修改项（需人工审查后补充）"
+
+        steps = "\n".join(
+            f"{index}. {step}" for index, step in enumerate(strategy.steps, 1)
+        ) if strategy and strategy.steps else (
+            "1. 人工审查受影响代码，定位漏洞触发路径\n"
+            "2. 补全缺失的安全控制\n"
+            "3. 运行回归测试确认修复有效且无副作用"
+        )
+
         tests = "\n".join(
             f"- {item.name}：{item.assertion}"
             for item in remediation_plan.required_tests
-        ) or "- 暂无测试计划"
+        ) or "- 暂无测试计划（需人工补充）"
+
         alternatives = "\n".join(
             f"- 不采用 `{item.alternative}`：{item.reason}"
             for item in remediation_plan.rejected_alternatives
         ) or "- 暂无替代方案记录"
+
+        strategy_summary = strategy.summary if strategy else f"针对 {finding.vulnerability_type or '未知漏洞'} 的最小化安全修复"
+
         return (
-            f"**修复目标**：{remediation_plan.remediation_goal}\n\n"
+            f"**修复目标**：{goal}\n\n"
             f"**修改文件**：\n{changes}\n\n"
-            f"**修改策略**：{strategy.summary if strategy else '按根因补齐缺失安全控制'}\n\n"
+            f"**修改策略**：{strategy_summary}\n\n"
             f"**实施步骤**：\n{steps}\n\n"
             f"**需要新增/保留的测试**：\n{tests}\n\n"
             f"**替代方案取舍**：\n{alternatives}"
@@ -286,6 +380,63 @@ class RemediationReportAgent:
         return summary
 
     @staticmethod
+    def _impact_summary(
+        finding: NormalizedVulnerability,
+        impact: ImpactAssessment,
+    ) -> str:
+        """渲染影响面评估为报告可用的 markdown 文本。"""
+        has_data = bool(impact.affected_services or impact.entry_points or impact.call_paths)
+
+        lines = []
+        if impact.affected_services:
+            services = "\n".join(f"- {s}" for s in impact.affected_services)
+            lines.append(f"**受影响服务/组件**：\n{services}")
+
+        if impact.entry_points:
+            entries = []
+            for ep in impact.entry_points:
+                auth = f"，认证: {ep.authentication}" if ep.authentication and ep.authentication != "unknown" else ""
+                exposed = "，公网可达" if ep.internet_exposed else ""
+                entries.append(f"- `{ep.method} {ep.route}`{auth}{exposed}")
+            lines.append(f"**API 入口点**：\n{chr(10).join(entries)}")
+
+        if impact.call_paths:
+            paths = []
+            for i, path in enumerate(impact.call_paths, 1):
+                paths.append(f"{i}. {' → '.join(path)}")
+            lines.append(f"**调用路径**：\n{chr(10).join(paths)}")
+
+        if impact.data_classification:
+            data = "\n".join(f"- {d}" for d in impact.data_classification)
+            lines.append(f"**受影响数据**：\n{data}")
+
+        if impact.affected_assets:
+            assets = "\n".join(f"- {a}" for a in impact.affected_assets)
+            lines.append(f"**受影响资产**：\n{assets}")
+
+        if impact.suggested_tests:
+            tests = "\n".join(f"- {t}" for t in impact.suggested_tests)
+            lines.append(f"**建议回归测试**：\n{tests}")
+
+        if not has_data:
+            # 从 finding 中生成有意义的降级内容
+            locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
+            evidence = "; ".join(e for e in (finding.evidence or []) if e.strip())
+            lines.append(
+                f"**受影响服务**：受 {finding.vulnerability_type} 影响的认证/授权服务组件。\n"
+                f"受影响位置: {', '.join(locs) if locs else 'unknown'}。\n"
+                f"{'证据: ' + evidence if evidence else ''}"
+                f"\n\n⚠️ 影响面分析 Agent 未产出完整结构化结果，以上为基于漏洞报告的推断。"
+                f"建议人工确认实际的受影响范围和服务边界。"
+            )
+
+        if impact.unknowns:
+            unknown_list = "\n".join(f"- {u}" for u in impact.unknowns)
+            lines.append(f"**不确定项**：\n{unknown_list}")
+
+        return "\n\n".join(lines)
+
+    @staticmethod
     def _human_review_focus(
         finding: NormalizedVulnerability,
         impact: ImpactAssessment,
@@ -330,6 +481,7 @@ class RemediationReportAgent:
         remediation_plan: RemediationPlan,
         root_cause_summary: str,
         remediation_summary: str,
+        impact_summary: str,
         rollback_summary: str,
         changed_files: list[str],
         test_results: list[str],
@@ -356,6 +508,7 @@ class RemediationReportAgent:
             f"- 严重性：{finding.severity.value}\n"
             f"- 来源工具：{finding.scanner}\n"
             f"- 受影响服务：{affected_services}\n\n"
+            f"## 影响面\n{impact_summary}\n\n"
             f"## 漏洞根因\n{root_cause_summary}\n\n"
             f"## 修复方案\n{remediation_summary}\n\n"
             f"## 修改文件列表\n{changed}\n\n"

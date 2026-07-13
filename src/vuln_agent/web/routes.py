@@ -23,7 +23,11 @@ async def dashboard(request: Request):
 @router.get("/new")
 async def new_fix(request: Request):
     """新建修复任务页面。"""
-    return request.app.state.render("new_fix.html", request=request)
+    return request.app.state.render(
+        "new_fix.html",
+        request=request,
+        initial_repo_id=request.query_params.get("repo_id", ""),
+    )
 
 
 @router.get("/finding/{finding_id}")
@@ -65,6 +69,9 @@ async def repo_browse(request: Request, repo_id: str):
     try:
         from .git_handler import git_handler
         info = git_handler.get_repo_info(repo_id)
+        branch = request.query_params.get("branch")
+        if info and branch:
+            info["branch"] = branch
     except Exception:
         info = None
     return request.app.state.render(
