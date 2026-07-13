@@ -46,7 +46,7 @@ class RemediationReportAgent:
         patch_candidate: PatchCandidate,
         validation: ValidationToolchainResult,
     ) -> RemediationReport:
-        if validation.status != PatchValidationStatus.PASSED or not validation.report_ready:
+        if validation.status == PatchValidationStatus.FAILED or not validation.report_ready:
             return self._blocked_report(finding, patch_candidate, validation)
 
         changed_files = self._changed_files(patch_candidate)
@@ -55,13 +55,23 @@ class RemediationReportAgent:
         security_validation_results = self._security_validation_results(validation)
         risk_summary = self._risk_summary(remediation_plan, patch_candidate)
         title = f"修复 {finding.vulnerability_type}（{finding.finding_id}）"
-        executive = (
-            f"候选补丁 {patch_candidate.patch_id} 已针对 {finding.vulnerability_type} 完成修复，"
-            "并通过构建、业务回归、安全回归、扫描复验和差异风险验证。"
-        )
+        fully_validated = validation.status == PatchValidationStatus.PASSED
+        if fully_validated:
+            executive = (
+                f"候选补丁 {patch_candidate.patch_id} 已针对 {finding.vulnerability_type} 生成，"
+                "并在隔离的临时工作区通过全部适用验证。"
+                "补丁未写入或合并到原始代码仓库，需由人工审查后决定是否采用。"
+            )
+        else:
+            executive = (
+                f"候选补丁 {patch_candidate.patch_id} 已针对 {finding.vulnerability_type} 生成并在隔离工作区执行验证。"
+                "部分验证尚未配置或未完成，报告保留已执行证据和待验证项；补丁未写入原始仓库，"
+                "当前仅供人工审查，不能视为完整验证通过。"
+            )
         root_cause_summary = self._root_cause_summary(finding, root_cause, remediation_plan)
         remediation_summary = self._remediation_summary(finding, remediation_plan)
         impact_summary = self._impact_summary(finding, impact)
+        patch_markdown = self._patch_markdown(patch_candidate)
         rollback_summary = self._rollback_summary(remediation_plan)
         human_review_focus = self._human_review_focus(finding, impact, remediation_plan, patch_candidate)
         sections = [
@@ -70,6 +80,7 @@ class RemediationReportAgent:
             ReportSection("漏洞根因", root_cause_summary),
             ReportSection("修复方案", remediation_summary),
             ReportSection("修改文件列表", "\n".join(f"- {file}" for file in changed_files)),
+            ReportSection("候选补丁", patch_markdown),
             ReportSection("测试结果", "\n".join(f"- {item}" for item in test_results)),
             ReportSection("安全验证结果", "\n".join(f"- {item}" for item in security_validation_results)),
             ReportSection("风险说明", "\n".join(f"- {risk}" for risk in risk_summary) or "未发现额外风险。"),
@@ -87,6 +98,7 @@ class RemediationReportAgent:
             impact_summary,
             rollback_summary,
             changed_files,
+            patch_markdown,
             test_results,
             security_validation_results,
             validation_summary,
@@ -106,7 +118,7 @@ class RemediationReportAgent:
             report_id=f"report-{finding.finding_id}-{patch_candidate.patch_id}",
             finding_id=finding.finding_id,
             patch_id=patch_candidate.patch_id,
-            status=RemediationReportStatus.READY,
+            status=RemediationReportStatus.READY if fully_validated else RemediationReportStatus.CANDIDATE,
             title=title,
             executive_summary=executive,
             root_cause_summary=root_cause_summary,
@@ -135,7 +147,9 @@ class RemediationReportAgent:
         markdown = (
             f"# {finding.finding_id} 修复报告生成被阻断\n\n"
             f"补丁 `{patch_candidate.patch_id}` 未通过验证，因此不能生成正式修复报告。\n\n"
-            f"阻断原因：{reason}\n"
+            f"阻断原因：{reason}\n\n"
+            f"## 未验证的候选补丁\n\n"
+            f"{RemediationReportAgent._patch_markdown(patch_candidate)}\n"
         )
         return RemediationReport(
             report_id=f"report-{finding.finding_id}-blocked",
@@ -351,7 +365,8 @@ class RemediationReportAgent:
             summary.append(f"{layer_name}：{status}" if layer.status == ToolExecutionStatus.PASSED else f"{layer_name}：{status} - {layer.summary}")
             for tool in layer.tool_results:
                 tool_status = STATUS_NAMES.get(tool.status, tool.status.value)
-                summary.append(f"  - {tool.tool_name}：{tool_status}（{tool.summary}）")
+                details = RemediationReportAgent._tool_evidence(tool)
+                summary.append(f"  - {tool.tool_name}：{tool_status}（{tool.summary}）{details}")
         return summary
 
     @staticmethod
@@ -376,8 +391,37 @@ class RemediationReportAgent:
             summary.append(f"{layer_name}：{status} - {layer.summary}")
             for tool in layer.tool_results:
                 tool_status = STATUS_NAMES.get(tool.status, tool.status.value)
-                summary.append(f"  - {tool.tool_name}：{tool_status}（{tool.summary}）")
+                details = RemediationReportAgent._tool_evidence(tool)
+                summary.append(f"  - {tool.tool_name}：{tool_status}（{tool.summary}）{details}")
         return summary
+
+    @staticmethod
+    def _tool_evidence(tool) -> str:
+        parts = []
+        if tool.command:
+            parts.append(f"命令: `{tool.command}`")
+        if tool.exit_code is not None:
+            parts.append(f"退出码: {tool.exit_code}")
+        if tool.duration_ms is not None:
+            parts.append(f"耗时: {tool.duration_ms} ms")
+        if tool.evidence:
+            evidence = "\n".join(str(item) for item in tool.evidence[:10])
+            parts.append(f"证据:\n```text\n{evidence}\n```")
+        return "\n    " + "；".join(parts) if parts else ""
+
+    @staticmethod
+    def _patch_markdown(patch_candidate: PatchCandidate) -> str:
+        if not patch_candidate.artifacts:
+            return "未生成可审查的补丁 artifact。"
+        blocks = []
+        for artifact in patch_candidate.artifacts:
+            language = "diff" if "--- " in artifact.content and "+++ " in artifact.content else "text"
+            blocks.append(
+                f"### `{artifact.target}`\n\n"
+                f"{artifact.description}\n\n"
+                f"```{language}\n{artifact.content.rstrip()}\n```"
+            )
+        return "\n\n".join(blocks)
 
     @staticmethod
     def _impact_summary(
@@ -387,7 +431,10 @@ class RemediationReportAgent:
         """渲染影响面评估为报告可用的 markdown 文本。"""
         has_data = bool(impact.affected_services or impact.entry_points or impact.call_paths)
 
-        lines = []
+        lines = [
+            f"**证据等级**：状态 `{impact.status.value}`，置信度 {impact.confidence_score:.2f}。"
+            "以下列表仅应包含已由当前仓库、资产或运行时上下文支持的项目；潜在范围列在不确定项中。"
+        ]
         if impact.affected_services:
             services = "\n".join(f"- {s}" for s in impact.affected_services)
             lines.append(f"**受影响服务/组件**：\n{services}")
@@ -484,6 +531,7 @@ class RemediationReportAgent:
         impact_summary: str,
         rollback_summary: str,
         changed_files: list[str],
+        patch_markdown: str,
         test_results: list[str],
         security_validation_results: list[str],
         validation_summary: list[str],
@@ -512,6 +560,7 @@ class RemediationReportAgent:
             f"## 漏洞根因\n{root_cause_summary}\n\n"
             f"## 修复方案\n{remediation_summary}\n\n"
             f"## 修改文件列表\n{changed}\n\n"
+            f"## 候选补丁\n{patch_markdown}\n\n"
             f"## 测试结果\n{tests}\n\n"
             f"## 安全验证结果\n{security}\n\n"
             f"## 完整验证结果\n{validation}\n\n"

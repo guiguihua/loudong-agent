@@ -130,6 +130,7 @@ class RemediationFeedbackTarget(StrEnum):
 
 class RemediationReportStatus(StrEnum):
     READY = "ready"
+    CANDIDATE = "candidate"
     BLOCKED = "blocked"
 
 

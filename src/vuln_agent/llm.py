@@ -418,6 +418,7 @@ class LLMBackend:
     api_key: str | None = field(default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY"))
     base_url: str = DEFAULT_BASE_URL
     max_tokens: int = 16384
+    request_timeout_seconds: float = 120.0
 
     def __post_init__(self):
         # 允许通过环境变量覆盖 base_url 和 model
@@ -429,6 +430,9 @@ class LLMBackend:
         env_model = os.environ.get("DEEPSEEK_MODEL")
         if env_model:
             self.model = env_model
+        env_timeout = os.environ.get("DEEPSEEK_TIMEOUT_SECONDS")
+        if env_timeout:
+            self.request_timeout_seconds = float(env_timeout)
 
     def reason(
         self,
@@ -460,7 +464,12 @@ class LLMBackend:
                 "需要安装 openai SDK：pip install openai"
             )
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.request_timeout_seconds,
+            max_retries=1,
+        )
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -507,7 +516,12 @@ class LLMBackend:
         except ImportError:
             raise RuntimeError("需要安装 openai SDK：pip install openai")
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.request_timeout_seconds,
+            max_retries=1,
+        )
 
         kwargs: dict[str, Any] = {
             "model": self.model,

@@ -10,6 +10,7 @@ import difflib
 import re
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from .agent import BaseAgent, create_default_tools
@@ -49,7 +50,6 @@ PATCH_AGENT_PROMPT = """你是一位资深安全代码修复工程师，负责�
 ## 可用工具
 - read_file: 读取需要修改的源码文件
 - search_code: 搜索相关模式（其他需修改的调用点、测试文件位置等）
-- run_shell: 运行命令验证（如 python -m py_compile 检查语法）
 
 ## 重要规则
 1. 每个文件的修改必须是 unified diff 格式（--- a/path / +++ b/path / @@）
@@ -57,15 +57,15 @@ PATCH_AGENT_PROMPT = """你是一位资深安全代码修复工程师，负责�
 3. 只修改必要的最小范围代码
 4. 不要修改不相关的代码
 5. 如果源码中确实存在漏洞模式，生成精确的代码修复
-6. 生成补丁后，最多用 run_shell 验证 2-3 次（语法检查 + 1个安全验证）
-7. 验证完成后**必须立即**调用 submit_final_result 提交补丁
-8. **禁止**反复用 run_shell 做无意义的重复验证
+6. 生成补丁后**必须立即**调用 submit_final_result 提交候选补丁；真实验证由隔离工作区中的 ValidationToolchain 执行
+7. 只依据漏洞报告和当前仓库源码、配置与测试生成补丁；不得假设、检索或照搬官方/上游修复
+8. 输出是供人工审查的候选补丁；不得写入、提交或合并到原始仓库
 
 确认补丁生成完毕后，调用 submit_final_result 工具提交最终结果。"""
 
 
 class PatchGenerationAgent(BaseAgent):
-    """生成安全补丁 — 读懂源码，运行验证。"""
+    """生成安全补丁 — 读懂源码并输出候选 diff，不修改工作区。"""
 
     def __init__(
         self,
@@ -77,7 +77,7 @@ class PatchGenerationAgent(BaseAgent):
         super().__init__(
             name="PatchGeneration",
             system_prompt=PATCH_AGENT_PROMPT,
-            tools=create_default_tools(ws, include_shell=True),
+            tools=create_default_tools(ws, include_shell=False),
             llm=llm,
             max_turns=15,
             workspace=ws,
@@ -109,29 +109,251 @@ class PatchGenerationAgent(BaseAgent):
             finding, impact, root_cause, remediation_plan,
             source_files, previous_attempt,
         )
-        # 不再因有内联源码而禁用工具。
-        # Agent 仍然需要 read_file（读其他相关文件）、search_code（搜索相似模式）、
-        # run_shell（语法验证）来完成高质量的补丁生成。
-        try:
-            raw = self.run(task)
-        except Exception as exc:
-            return self._blocked_candidate(
-                finding,
-                remediation_plan,
-                f"patch generation unavailable: {exc}",
+        # Agent can inspect files and search code, but cannot mutate the source
+        # workspace. Candidate execution happens later in an isolated copy.
+        # Multi-file diffs are deliberately generated artifact-by-artifact.
+        # This is a response-size routing decision, not a scope restriction.
+        if len(remediation_plan.planned_changes) > 3:
+            raw = self._generate_artifacts_by_file(
+                finding, root_cause, remediation_plan, source_files,
+                failure_reason="multi-file plan routed directly to per-file generation",
             )
+        else:
+            try:
+                raw = self.run(task)
+            except Exception as exc:
+                raw = self._generate_artifacts_by_file(
+                    finding, root_cause, remediation_plan, source_files,
+                    failure_reason=f"single-response generation failed: {exc}",
+                )
 
         if "_raw_output" in raw:
             # 主分析未输出结构化 JSON → 尝试二次提取
             extracted = self._extract_patch_from_raw(
                 raw["_raw_output"], finding, remediation_plan, source_files
             )
-            return self._dict_to_patch_candidate(
-                finding, remediation_plan, repository, extracted, previous_attempt,
+            raw = extracted
+        if not self._has_applicable_artifacts(raw):
+            raw = self._generate_artifacts_by_file(
+                finding, root_cause, remediation_plan, source_files,
+                failure_reason="single-response output contained no complete unified diff",
             )
+        if not self._has_applicable_artifacts(raw):
+            reason = str(raw.get("blocked_reason") or "per-file generation produced no applicable unified diff")
+            return self._blocked_candidate(finding, remediation_plan, reason)
         return self._dict_to_patch_candidate(
             finding, remediation_plan, repository, raw, previous_attempt,
         )
+
+    @staticmethod
+    def _has_applicable_artifacts(raw: dict) -> bool:
+        artifacts = raw.get("artifacts") if isinstance(raw, dict) else None
+        return bool(artifacts) and all(
+            isinstance(item, dict)
+            and item.get("target")
+            and "--- " in str(item.get("content", ""))
+            and "+++ " in str(item.get("content", ""))
+            and "@@" in str(item.get("content", ""))
+            for item in artifacts
+        )
+
+    def _generate_artifacts_by_file(
+        self,
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+        remediation_plan: RemediationPlan,
+        source_files: list[SourceFile],
+        *,
+        failure_reason: str,
+    ) -> dict:
+        """Generate one compact artifact at a time, then assemble deterministically.
+
+        Large tool-call JSON containing several diffs is prone to truncation.  A
+        per-file call keeps each response small and preserves already generated
+        artifacts if a later file fails.
+        """
+        if not self.llm:
+            return {"artifacts": [], "blocked_reason": failure_reason}
+
+        artifacts: list[dict] = []
+        changed_files: list[dict] = []
+        generation_errors: list[str] = []
+        for change in remediation_plan.planned_changes:
+            source = self._find_source_file(change.file, source_files)
+            if source is None:
+                generation_errors.append(f"source file not found for planned change: {change.file}")
+                continue
+            prompt = self._per_file_patch_prompt(
+                finding, root_cause, remediation_plan, change, source
+            )
+            artifact = self._request_single_artifact(prompt, source.path, change.change_type)
+            if artifact is None:
+                generation_errors.append(f"no valid unified diff generated for {source.path}")
+                continue
+            artifacts.append(artifact)
+            changed_files.append({
+                "file": source.path,
+                "change_type": artifact["patch_type"],
+                "reason": change.reason,
+            })
+
+        requires_security_test = any(
+            "security" in item.test_type.lower() or "安全" in item.test_type
+            for item in remediation_plan.required_tests
+        )
+        if requires_security_test and not any(item["patch_type"] == "test" for item in artifacts):
+            test_source = self._select_test_source(source_files, remediation_plan)
+            if test_source is None:
+                generation_errors.append("no repository test file found for required security regression")
+            else:
+                assertions = "; ".join(item.assertion for item in remediation_plan.required_tests[:8])
+                test_change = SimpleNamespace(
+                    description="新增或扩展漏洞安全回归测试",
+                    reason=f"验证候选补丁阻断漏洞且保留合法行为。断言: {assertions}",
+                    change_type="test",
+                )
+                prompt = self._per_file_patch_prompt(
+                    finding, root_cause, remediation_plan, test_change, test_source
+                )
+                test_artifact = self._request_single_artifact(prompt, test_source.path, "test")
+                if test_artifact is None:
+                    generation_errors.append(f"no valid security test diff generated for {test_source.path}")
+                else:
+                    artifacts.append(test_artifact)
+                    changed_files.append({
+                        "file": test_source.path,
+                        "change_type": "test",
+                        "reason": test_change.reason,
+                    })
+
+        blocked_reason = None
+        if not artifacts:
+            blocked_reason = f"{failure_reason}; " + "; ".join(generation_errors)
+        return {
+            "summary": f"逐文件生成并组装 {finding.finding_id} 候选补丁",
+            "artifacts": artifacts,
+            "changed_files": changed_files,
+            "security_notes": ["大响应生成失败后使用逐文件补丁生成，artifact 由程序确定性组装。"],
+            "assumptions": ["per_file_patch_generation_fallback"],
+            "risks": generation_errors,
+            "needs_human_review": True,
+            "blocked_reason": blocked_reason,
+        }
+
+    @staticmethod
+    def _find_source_file(expected: str, source_files: list[SourceFile]) -> SourceFile | None:
+        normalized = expected.replace("\\", "/").strip().lstrip("./")
+        exact = [sf for sf in source_files if sf.path.replace("\\", "/").lstrip("./") == normalized]
+        if exact:
+            return exact[0]
+        suffix = [
+            sf for sf in source_files
+            if sf.path.replace("\\", "/").lstrip("./").endswith("/" + normalized)
+            or normalized.endswith("/" + sf.path.replace("\\", "/").lstrip("./"))
+        ]
+        return suffix[0] if len(suffix) == 1 else None
+
+    @staticmethod
+    def _select_test_source(
+        source_files: list[SourceFile], remediation_plan: RemediationPlan
+    ) -> SourceFile | None:
+        tests = [
+            sf for sf in source_files
+            if sf.path.lower().endswith(".py")
+            and any(part.lower().startswith("test") for part in Path(sf.path).parts)
+        ]
+        if not tests:
+            return None
+        tokens = {
+            Path(change.file).stem.lower()
+            for change in remediation_plan.planned_changes
+            if change.file
+        }
+        ranked = sorted(
+            tests,
+            key=lambda sf: (
+                -sum(token in sf.path.lower() for token in tokens if len(token) > 2),
+                len(sf.path),
+            ),
+        )
+        return ranked[0]
+
+    @staticmethod
+    def _per_file_patch_prompt(
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+        remediation_plan: RemediationPlan,
+        change,
+        source: SourceFile,
+    ) -> str:
+        content = source.content or ""
+        if len(content) > 24000:
+            content = content[:24000] + "\n... source truncated ..."
+        return f"""只为一个文件生成安全候选补丁，不要修改其他文件。
+
+漏洞: {finding.finding_id} / {finding.vulnerability_type}
+根因: {root_cause.root_cause.summary}
+缺失控制: {root_cause.root_cause.missing_control or 'unknown'}
+修复目标: {remediation_plan.remediation_goal}
+目标文件: {source.path}
+计划修改: {change.description}
+必要性: {change.reason}
+
+当前文件完整内容或受限片段:
+```text
+{content}
+```
+
+返回该文件的 unified diff。diff 头必须严格使用：
+--- a/{source.path}
++++ b/{source.path}
+不得输出其他文件的变更，不得引用官方或上游补丁。"""
+
+    def _request_single_artifact(
+        self, prompt: str, target: str, change_type: str | None
+    ) -> dict | None:
+        schema = {
+            "type": "object",
+            "description": "一个文件的候选补丁",
+            "properties": {
+                "content": {"type": "string", "description": "完整 unified diff"},
+                "description": {"type": "string"},
+                "security_notes": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["content", "description"],
+        }
+        try:
+            result = self.llm.reason(
+                user_prompt=prompt,
+                system_prompt="你是安全补丁生成器。一次只输出一个文件的最小且因果完整的 unified diff。",
+                output_schema=schema,
+                temperature=0.1,
+            )
+        except Exception:
+            return None
+        if isinstance(result, dict):
+            content = str(result.get("content", ""))
+            description = str(result.get("description", "逐文件生成的安全补丁"))
+        else:
+            extracted = self._extract_first_diff(str(result))
+            content = extracted or ""
+            description = "从逐文件文本响应中提取的安全补丁"
+        if not ("--- " in content and "+++ " in content and "@@" in content):
+            return None
+        patch_type = change_type if change_type in {item.value for item in PatchType} else "code"
+        return {
+            "patch_type": patch_type,
+            "target": target,
+            "content": content.strip(),
+            "description": description,
+        }
+
+    @staticmethod
+    def _extract_first_diff(text: str) -> str | None:
+        fenced = re.search(r"```(?:diff|patch)?\s*\n([\s\S]*?)\n```", text)
+        candidate = fenced.group(1) if fenced else text
+        start = candidate.find("--- ")
+        return candidate[start:].strip() if start >= 0 and "+++ " in candidate[start:] and "@@" in candidate[start:] else None
 
     def _extract_patch_from_raw(
         self,
@@ -150,7 +372,7 @@ class PatchGenerationAgent(BaseAgent):
 
         # 提取源码中可能的文件路径，帮助 LLM 定位
         source_paths = [sf.path for sf in source_files[:10] if sf.path]
-        target_files = [c.file for c in remediation_plan.planned_changes[:5]]
+        target_files = [c.file for c in remediation_plan.planned_changes]
 
         extraction_prompt = f"""以下是一段补丁生成的原始输出文本。请从中提取关键信息，填入指定 JSON 结构。
 
@@ -286,7 +508,7 @@ class PatchGenerationAgent(BaseAgent):
 
         # 如果没有找到任何文件变更记录，从修复方案中提取
         if not changed_files:
-            for change in remediation_plan.planned_changes[:5]:
+            for change in remediation_plan.planned_changes:
                 cf = change.file
                 if cf.lower() not in seen_targets:
                     seen_targets.add(cf.lower())
@@ -398,7 +620,7 @@ class PatchGenerationAgent(BaseAgent):
 1. 优先基于“关键源码片段”生成补丁；如果片段不足，再用 read_file 读取完整文件
 2. 生成 unified diff 格式补丁（--- a/path / +++ b/path / @@ -L,N +L,N @@）
 3. 只修改必要的最小范围代码
-4. 生成后可用 run_shell 验证（如 python -m py_compile file.py）"""
+4. 只输出候选 diff；不要写入源码。构建和安全验证由隔离工作区中的验证器执行"""
 
     @staticmethod
     def _source_snippets(source_files: list[SourceFile]) -> str:
@@ -451,17 +673,57 @@ class PatchGenerationAgent(BaseAgent):
                 for a in artifacts
             ]
 
+        allowed_files = {
+            item.replace("\\", "/").lstrip("./")
+            for item in remediation_plan.patch_boundaries.allowed_files
+            if item and item != "unknown"
+        }
+        if remediation_plan.required_tests:
+            allowed_files.update(
+                item.target.replace("\\", "/").lstrip("./")
+                for item in artifacts
+                if item.patch_type == PatchType.TEST and item.target
+            )
+        actual_files = {
+            item.file.replace("\\", "/").lstrip("./") for item in changed_files if item.file
+        } | {
+            item.target.replace("\\", "/").lstrip("./") for item in artifacts if item.target
+        }
+
+        def is_allowed(path: str) -> bool:
+            return not allowed_files or any(
+                path == allowed or path.endswith("/" + allowed) or allowed.endswith("/" + path)
+                for allowed in allowed_files
+            )
+
+        out_of_scope = sorted(path for path in actual_files if not is_allowed(path))
+        estimated_diff_lines = sum(
+            sum(1 for line in a.content.splitlines()
+                if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+            for a in artifacts
+        )
+        scope_warnings = []
+        if len(actual_files) > remediation_plan.patch_boundaries.maximum_changed_files:
+            scope_warnings.append(
+                f"补丁涉及 {len(actual_files)} 个文件，超过方案的审查基线 "
+                f"{remediation_plan.patch_boundaries.maximum_changed_files}；需逐文件确认必要性。"
+            )
+        if estimated_diff_lines > remediation_plan.patch_boundaries.maximum_diff_lines:
+            scope_warnings.append(
+                f"补丁约 {estimated_diff_lines} 行，超过方案的审查基线 "
+                f"{remediation_plan.patch_boundaries.maximum_diff_lines}；需加强回归和人工审查。"
+            )
+        hard_violations = [f"artifact outside planned scope: {path}" for path in out_of_scope]
         policy_check = PatchPolicyCheck(
-            allowed_files_only=True,
+            allowed_files_only=not out_of_scope,
             forbidden_changes_detected=False,
             changed_files_count=len(changed_files),
-            estimated_diff_lines=sum(
-                sum(1 for line in a.content.splitlines()
-                    if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
-                for a in artifacts
-            ),
-            within_patch_boundaries=True,
-            violations=[],
+            estimated_diff_lines=estimated_diff_lines,
+            # Size is an adaptive review signal, not a reason to truncate or
+            # reject a causally complete fix. Unplanned files remain a hard
+            # boundary because they were never justified by the plan.
+            within_patch_boundaries=not hard_violations,
+            violations=[*hard_violations, *scope_warnings],
         )
 
         attempt = 1 if previous_attempt is None else previous_attempt.attempt + 1
@@ -475,7 +737,7 @@ class PatchGenerationAgent(BaseAgent):
             test_changes=list(remediation_plan.required_tests),
             security_notes=raw.get("security_notes", []),
             assumptions=raw.get("assumptions", []),
-            risks=raw.get("risks", []),
+            risks=list(dict.fromkeys([*raw.get("risks", []), *scope_warnings])),
             validation_plan=PatchGenerationAgent._validation_plan(remediation_plan, repository),
             policy_check=policy_check,
             blocked_reason=raw.get("blocked_reason"),
@@ -536,8 +798,25 @@ class PatchValidationAgent:
         candidate: PatchCandidate,
         remediation_plan: RemediationPlan,
     ) -> PatchValidationResult:
+        generated_check = self._candidate_generated(candidate)
+        if generated_check.status == VerificationCheckStatus.FAILED:
+            failure = VerificationFailure(
+                generated_check.name,
+                generated_check.details,
+                self._suggestion(generated_check.name),
+            )
+            return PatchValidationResult(
+                patch_id=candidate.patch_id,
+                finding_id=candidate.finding_id,
+                status=PatchValidationStatus.FAILED,
+                checks=[generated_check],
+                failures=[failure],
+                next_action="send_to_failure_analysis_agent",
+                feedback_for_regeneration=f"{failure.check}: {failure.reason}",
+                needs_human_review=True,
+            )
         checks = [
-            self._candidate_generated(candidate),
+            generated_check,
             self._policy_passed(candidate),
             self._required_artifacts_present(candidate, remediation_plan),
             self._security_tests_present(candidate, remediation_plan),
@@ -608,10 +887,11 @@ class PatchValidationAgent:
         if not missing:
             return VerificationCheck("planned_change_artifacts", VerificationCheckStatus.PASSED,
                                      "all planned code changes have patch artifacts")
-        # 降级为 SKIPPED 而非 FAILED：补丁可能用不同文件实现相同修复意图，
-        # 静态文件匹配不是精确的，真正验证应该由构建/测试/扫描完成。
-        return VerificationCheck("planned_change_artifacts", VerificationCheckStatus.SKIPPED,
-                                 f"missing artifacts for: {', '.join(missing)} — 补丁可能以不同方式覆盖，需人工审查")
+        return VerificationCheck(
+            "planned_change_artifacts",
+            VerificationCheckStatus.FAILED,
+            f"missing artifacts for causally required planned changes: {', '.join(missing)}",
+        )
 
     @staticmethod
     def _expected_file_candidates(expected: str) -> list[str]:

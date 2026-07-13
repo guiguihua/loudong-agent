@@ -908,9 +908,16 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
         from .remediation import RemediationPlanAgent
         from .reporting import RemediationReportAgent
         from .validation import ValidationToolchain
+        from .execution import WorkspaceValidationExecutor
 
         max_attempts = int(body.get("max_attempts") or 2)
 
+        validation_commands = body.get("validation_commands") or {}
+        validation_executor = WorkspaceValidationExecutor(
+            workspace=workspace,
+            commands=validation_commands,
+            timeout_seconds=int(body.get("validation_timeout") or 300),
+        )
         loop = PatchRepairLoopOrchestrator(
             remediation_agent=RemediationPlanAgent(
                 llm=llm,
@@ -919,7 +926,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 max_turns=10 if not fast_mode else 6,
             ),
             patch_generation_agent=PatchGenerationAgent(PatchGenerationPolicy(), llm=llm, workspace=workspace),
-            validation_toolchain=ValidationToolchain(),
+            validation_toolchain=ValidationToolchain(executor=validation_executor),
             failure_analysis_agent=FailureAnalysisAgent(llm=llm, workspace=workspace),
             report_agent=RemediationReportAgent(),
             max_attempts=max_attempts,
@@ -969,9 +976,14 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             output["failure_analysis"] = result.final_failure_analysis.to_dict()
 
         if result.status.value == "succeeded":
-            task_manager.update(task_id, status="succeeded", progress="✅ 修复完成！", result=output)
+            task_manager.update(task_id, status="succeeded", progress="✅ 候选补丁生成并完成验证", result=output)
         elif result.status.value == "blocked":
-            task_manager.update(task_id, status="succeeded", progress="⚠️ 流程完成：补丁生成被阻断，需人工复核", result=output)
+            candidate_status = output.get("patch_candidate", {}).get("status")
+            if candidate_status == "generated":
+                progress = "⚠️ 候选补丁已生成；部分验证待补充，需人工复核"
+            else:
+                progress = "⚠️ 流程完成：补丁生成被阻断，需人工复核"
+            task_manager.update(task_id, status="succeeded", progress=progress, result=output)
         else:
             task_manager.update(task_id, status="failed", progress="❌ 修复失败",
                                 result=output,

@@ -101,6 +101,27 @@ class PatchRepairLoopOrchestrator:
                     needs_human_review=True,
                 )
 
+            if validation.status == PatchValidationStatus.NEEDS_HUMAN_REVIEW:
+                report = self.report_agent.generate(
+                    finding, impact, root_cause, remediation_plan, patch_candidate, validation,
+                )
+                attempts.append(RepairLoopAttempt(
+                    attempt=attempt_number,
+                    remediation_plan=remediation_plan,
+                    patch_candidate=patch_candidate,
+                    validation=validation,
+                    failure_analysis=None,
+                ))
+                return RepairLoopResult(
+                    finding_id=finding.finding_id,
+                    status=RepairLoopStatus.BLOCKED,
+                    attempts=attempts,
+                    final_report=report,
+                    final_failure_analysis=None,
+                    next_action="human_review_candidate_and_complete_missing_validation",
+                    needs_human_review=True,
+                )
+
             if patch_candidate.status == PatchCandidateStatus.BLOCKED:
                 report = self.report_agent.generate(
                     finding,
@@ -153,11 +174,22 @@ class PatchRepairLoopOrchestrator:
                 ],
             )
 
+        blocked_report = None
+        if attempts:
+            last = attempts[-1]
+            blocked_report = self.report_agent.generate(
+                finding,
+                impact,
+                root_cause,
+                last.remediation_plan,
+                last.patch_candidate,
+                last.validation,
+            )
         return RepairLoopResult(
             finding_id=finding.finding_id,
             status=RepairLoopStatus.EXHAUSTED,
             attempts=attempts,
-            final_report=None,
+            final_report=blocked_report,
             final_failure_analysis=failure_analysis,
             next_action="send_to_human_security_review_after_retry_exhaustion",
             needs_human_review=True,

@@ -44,6 +44,14 @@ IMPACT_AGENT_PROMPT = """你是一位应用安全工程师，负责分析安全�
 3. 追踪调用链，理解数据如何流动
 4. 最后给出完整的 JSON 格式影响面评估
 
+## 证据纪律（必须遵守）
+- 只有在源码、配置、资产清单或运行时证据中直接找到的服务、入口和调用路径，才能写入确认项。
+- 不得把框架常见入口、CVE 可能影响的下游集成或猜测的公网路由写成已确认影响面。
+- 对仅由漏洞类型/CVE 描述推导的范围，放入 unknowns，并明确写成“潜在影响，未在当前仓库确认”。
+- 每条调用路径必须包含可定位的文件、符号或已提供的运行时路径；否则不要输出该路径。
+- internet_exposed、authentication 没有配置或运行时证据时必须分别使用 null、unknown。
+- confidence_score 必须与证据匹配；只有代码路径、资产和运行时证据同时存在时才可使用 confirmed。
+
 在确认收集到足够信息后，调用 submit_final_result 工具提交最终结果。"""
 
 
@@ -275,7 +283,7 @@ class ImpactAnalysisAgent(BaseAgent):
 
 ## 要求
 请先读代码文件确认服务、路由和调用关系，再给出影响面评估。
-如果你不确定某项信息，可以在 unknowns 中列出。"""
+只报告有证据支持的确认项。由 CVE 通用知识推导、但未在当前仓库确认的下游场景必须放入 unknowns，不能扩写成已确认服务、入口或调用路径。"""
 
     @staticmethod
     def _dict_to_assessment(finding: NormalizedVulnerability, raw: dict) -> ImpactAssessment:

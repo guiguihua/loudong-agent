@@ -42,6 +42,7 @@ from .tools import (
     StaticRuntimeEvidenceTool,
 )
 from .validation import ValidationToolchain, passed_tool, skipped_tool
+from .execution import WorkspaceValidationExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -143,10 +144,16 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
 
     # ── 修复循环 ──
     max_attempts = overrides.get("max_attempts", 2)
+    validation_commands = overrides.get("validation_commands", raw.get("validation_commands", {}))
+    validation_executor = WorkspaceValidationExecutor(
+        workspace=workspace,
+        commands=validation_commands,
+        timeout_seconds=int(overrides.get("validation_timeout", raw.get("validation_timeout", 300))),
+    )
     loop = PatchRepairLoopOrchestrator(
         remediation_agent=RemediationPlanAgent(llm=llm, workspace=workspace),
         patch_generation_agent=PatchGenerationAgent(PatchGenerationPolicy(), llm=llm, workspace=workspace),
-        validation_toolchain=ValidationToolchain(),
+        validation_toolchain=ValidationToolchain(executor=validation_executor),
         failure_analysis_agent=FailureAnalysisAgent(llm=llm, workspace=workspace),
         report_agent=RemediationReportAgent(),
         max_attempts=max_attempts,

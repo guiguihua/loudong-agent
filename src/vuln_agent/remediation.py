@@ -54,6 +54,16 @@ REMEDIATION_AGENT_PROMPT = """你是一位资深安全修复工程师，负责�
 3. 选择最优策略并给出具体步骤
 4. 考虑向后兼容性和回滚
 
+## 修复范围原则（必须遵守）
+- 目标是“因果完整且尽可能小”，不是追求固定文件数。修复必须覆盖恢复安全不变量所需的全部代码、配置、依赖声明和回归测试。
+- planned_changes 中的每个文件都必须说明它与已确认根因、受影响调用路径、兼容性要求或必要验证之间的直接关系。
+- 不得仅因为文件较多或 diff 较大而截断必要修复；多模块、共享底层组件、生成代码、配置与锁文件联动等场景可以合理修改多个文件。
+- 仅属一般性加固、日志、清理或无关架构优化的内容，通常放入 rejected_alternatives 或后续建议；如果它是恢复安全不变量不可缺少的一部分，可以进入候选补丁，但必须给出源码证据和不可替代性说明。
+- 修复决策只能依据当前漏洞报告、当前源码、配置、依赖和测试证据；不得依赖尚不存在的上游/官方补丁，也不得照搬外部参考实现。
+- 如果评测数据中附带官方修复或参考答案，它们只允许在流水线完成后的离线评分阶段使用，不能进入修复规划或补丁生成上下文。
+- 文件数和 diff 行数只用于风险分级和人工审查提示，不作为自动截断或拒绝修复的硬阈值。
+- 不得把“可能更安全”当成扩大范围的充分理由；每项变更都要有可追溯证据，同时保证补丁可审查、可回滚、可验证。
+
 确认分析完成后，调用 submit_final_result 工具提交最终结果。"""
 
 
@@ -587,6 +597,17 @@ class RemediationPlanAgent(BaseAgent):
                 )
                 for target in target_files[:5]
             ]
+        # Preserve every causally justified change.  De-duplication is safe;
+        # truncating by a global file-count limit is not, because some fixes
+        # legitimately span shared code, callers, configuration and tests.
+        deduped_changes = []
+        seen_files: set[str] = set()
+        for change in planned_changes:
+            if change.file in seen_files:
+                continue
+            seen_files.add(change.file)
+            deduped_changes.append(change)
+        planned_changes = deduped_changes
         required_tests = [
             TestPlanItem(name=t["name"], test_type=t["test_type"],
                         target=t["target"], assertion=t["assertion"])
@@ -596,10 +617,15 @@ class RemediationPlanAgent(BaseAgent):
             RejectedAlternative(ra["alternative"], ra["reason"])
             for ra in raw.get("rejected_alternatives", [])
         ]
+        boundary_data = raw.get("patch_boundaries") if isinstance(raw.get("patch_boundaries"), dict) else {}
+        default_diff_budget = max(250, 150 * max(1, len(planned_changes)))
         boundaries = PatchBoundaries(
             allowed_files=[pc.file for pc in planned_changes],
             forbidden_changes=["不得绕过或削弱现有安全校验", "不得删除失败测试"],
-            maximum_changed_files=8, maximum_diff_lines=400,
+            maximum_changed_files=max(
+                len(planned_changes), int(boundary_data.get("maximum_changed_files", len(planned_changes) or 1))
+            ),
+            maximum_diff_lines=int(boundary_data.get("maximum_diff_lines", default_diff_budget)),
         )
         unknowns = list(dict.fromkeys(raw.get("unknowns", [])))
         plan = RemediationPlan(
