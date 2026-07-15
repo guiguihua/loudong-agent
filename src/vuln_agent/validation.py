@@ -39,22 +39,29 @@ class ValidationToolchain:
         tool_results: list[ValidationToolResult],
     ) -> ValidationToolchainResult:
         precheck = self.static_precheck.validate(candidate, remediation_plan)
-        if precheck.status == PatchValidationStatus.FAILED:
-            failures = list(precheck.failures)
+        precheck_failures = list(precheck.failures) if precheck.status == PatchValidationStatus.FAILED else []
+        # 仅有致命阻断裂问题时（candidate 未生成/patch 越界）才跳过外部验证
+        fatal_checks = {f.check for f in precheck_failures}
+        fatal_blockers = {
+            "candidate_generated", "patch_boundary_policy", "test_api_contract",
+            "security_regression_test",
+        }
+        has_fatal = bool(fatal_checks & fatal_blockers)
+        if has_fatal:
             layer = ValidationLayerResult(
                 layer=ValidationLayer.DIFFERENTIAL_RISK,
                 status=ToolExecutionStatus.FAILED,
                 tool_results=[],
-                summary="candidate failed static precheck; external validation was not started",
+                summary="candidate failed static precheck with fatal blockers; external validation was not started",
             )
             return ValidationToolchainResult(
                 patch_id=candidate.patch_id,
                 finding_id=candidate.finding_id,
                 status=PatchValidationStatus.FAILED,
                 layers=[layer],
-                failures=self._deduplicate_failures(failures),
+                failures=self._deduplicate_failures(precheck_failures),
                 next_action="send_to_failure_analysis_agent",
-                feedback_for_failure_analysis=self._feedback(failures),
+                feedback_for_failure_analysis=self._feedback(precheck_failures),
                 report_ready=False,
                 needs_human_review=True,
             )
@@ -63,7 +70,18 @@ class ValidationToolchain:
         grouped = self._group_results(tool_results)
         layers = self._layer_results(grouped)
 
-        failures: list[VerificationFailure] = []
+        # 将非致命静态预检失败注入结果（外部验证继续执行，但标注预检发现的问题）
+        if precheck_failures:
+            precheck_layer = ValidationLayerResult(
+                layer=ValidationLayer.DIFFERENTIAL_RISK,
+                status=ToolExecutionStatus.FAILED,
+                tool_results=[],
+                summary="static precheck issues (external validation proceeded): " + self._feedback(precheck_failures),
+            )
+            layers = [precheck_layer] + list(layers)
+
+        # 收集所有失败：预检失败 + 外部验证失败
+        failures: list[VerificationFailure] = list(precheck_failures)
         validation_gaps: list[VerificationFailure] = []
         for layer_result in layers:
             if layer_result.status == ToolExecutionStatus.FAILED:

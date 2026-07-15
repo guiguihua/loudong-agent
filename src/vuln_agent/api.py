@@ -25,7 +25,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,26 @@ from .normalization import VulnerabilityNormalizer
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+RUNTIME_STARTED_AT = datetime.now(timezone.utc).isoformat()
+
+
+def _runtime_build_id() -> str:
+    digest = hashlib.sha256()
+    package_dir = Path(__file__).resolve().parent
+    for name in (
+        "agent.py", "evidence.py", "impact.py", "root_cause.py",
+        "models.py", "remediation.py", "patching.py", "validation.py", "execution.py",
+        "failure_analysis.py", "json_repair.py",
+        "reporting.py", "orchestration.py", "reasoning.py", "llm.py",
+    ):
+        path = package_dir / name
+        if path.exists():
+            digest.update(name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+RUNTIME_BUILD_ID = _runtime_build_id()
 
 load_env_file()
 
@@ -86,6 +108,9 @@ def create_app() -> FastAPI:
         pr = status["pull_request"]
         return {
             "status": "ok",
+            "process_id": os.getpid(),
+            "started_at": RUNTIME_STARTED_AT,
+            "build_id": RUNTIME_BUILD_ID,
             "llm": "enabled" if status["llm"]["enabled"] else "disabled",
             "model": status["llm"]["model"],
             "pr_providers": [
@@ -470,6 +495,8 @@ def _run_fix_pipeline(payload: dict[str, Any]) -> dict[str, Any]:
             "language", "framework", "database", "package_manager",
             "repository", "branch", "services", "entry_points",
             "call_paths", "test_framework", "max_attempts",
+            "source_dir", "source_files", "validation_commands",
+            "validation_timeout", "run_mode",
         )
     }
 
@@ -578,16 +605,36 @@ def _manual_review_validation_results():
 
 
 def _pipeline_mode(body: dict[str, Any]) -> str:
-    """运行模式：fast=轻量（max_turns 较少），deep=完整推理（默认）。
-
-    注意：两种模式都会运行完整的 5-Agent 流水线（Impact → RootCause →
-    Remediation → Patch → Validation）。区别仅在于 Agent 的 max_turns
-    （推理轮数），不会跳过任何分析阶段。
-    """
-    mode = str(body.get("run_mode") or body.get("mode") or "deep").strip().lower()
-    if mode not in {"fast", "deep"}:
-        return "deep"
+    """Return fast/balanced/deep; balanced is the production default."""
+    mode = str(body.get("run_mode") or body.get("mode") or "balanced").strip().lower()
+    if mode not in {"fast", "balanced", "deep"}:
+        return "balanced"
     return mode
+
+
+def _as_flat_source_dict(value: object) -> dict[str, str] | None:
+    """Normalize source_files to dict[str, str] for WorkspaceValidationExecutor.
+
+    Accepts dict[str, str], list[dict] (with path/content or file/content keys),
+    or list[str].  Returns None when *value* is empty or unrecognised.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        flat = {str(k): str(v) for k, v in value.items()}
+        return flat or None
+    if isinstance(value, list):
+        result: dict[str, str] = {}
+        for item in value:
+            if isinstance(item, dict):
+                path = str(item.get("path") or item.get("file") or "")
+                content = str(item.get("content") or "")
+                if path:
+                    result[path] = content
+            elif isinstance(item, str):
+                result[item] = ""
+        return result or None
+    return None
 
 
 def _fallback_impact(finding, code_ctx, asset_ctx, runtime_ctx, exc: Exception | None):
@@ -824,7 +871,9 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
 
     try:
         # 标准化
-        task_manager.update(task_id, progress="标准化漏洞报告...", stage=1)
+        task_info = task_manager.update(task_id, progress="标准化漏洞报告...", stage=1)
+        if task_info:
+            task_info.start_stage(1, "标准化漏洞报告")
         normalizer = VulnerabilityNormalizer()
         finding = normalizer.normalize(body)
         run_mode = _pipeline_mode(body)
@@ -839,6 +888,8 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 "请设置: $env:DEEPSEEK_API_KEY = 'sk-...'"
             )
         print(f"[Agent] 使用 {llm.model} 进行推理")
+        if task_info:
+            task_info.add_event("completed", f"LLM 后端就绪: {llm.model}", stage=1)
 
         # 上下文构建
         from .runner import (
@@ -868,8 +919,15 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
         else:
             root_cause_ctx = _build_code_root_cause(finding, body, {})
 
+        # Close stage 1 before entering stage 2
+        task_info = task_manager.get(task_id)
+        if task_info:
+            task_info.complete_stage(1, "标准化和证据收集完成")
+
         # ── 1. Impact Analysis（始终运行 LLM Agent）──
-        task_manager.update(task_id, progress="分析影响面...", stage=2)
+        task_info = task_manager.update(task_id, progress="分析影响面...", stage=2)
+        if task_info:
+            task_info.start_stage(2, "影响面分析")
         from .impact import ImpactAnalysisAgent
         from .tools import StaticAssetInventoryTool, StaticCodeContextTool, StaticRuntimeEvidenceTool
         try:
@@ -879,14 +937,20 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 StaticRuntimeEvidenceTool({finding.finding_id: runtime_ctx}),
                 llm=llm,
                 workspace=workspace,
+                pipeline_mode=run_mode,
             )
-            impact_agent.max_turns = 12 if not fast_mode else 6
             impact = impact_agent.analyze(finding, evidence_bundle)
+            if task_info:
+                task_info.complete_stage(2, f"影响面分析完成，置信度 {impact.confidence_score:.0%}")
         except Exception as exc:
+            if task_info:
+                task_info.add_event("error", f"影响面分析异常: {exc}", stage=2)
             impact = _fallback_impact(finding, code_ctx, asset_ctx, runtime_ctx, exc)
 
         # ── 2. Root Cause（始终运行 LLM Agent）──
-        task_manager.update(task_id, progress="分析根因...", stage=3)
+        task_info = task_manager.update(task_id, progress="分析根因...", stage=3)
+        if task_info:
+            task_info.start_stage(3, "根因分析")
         from .root_cause import RootCauseAnalysisAgent
         from .tools import StaticRootCauseEvidenceTool, RootCauseCodeContext, DependencyRootCauseContext
 
@@ -896,14 +960,19 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 if isinstance(root_cause_ctx, RootCauseCodeContext) else {},
                 dependency_contexts={finding.finding_id: root_cause_ctx}
                 if isinstance(root_cause_ctx, DependencyRootCauseContext) else {},
-            ), llm=llm, workspace=workspace)
-            rc_agent.max_turns = 12 if not fast_mode else 6
+            ), llm=llm, workspace=workspace, pipeline_mode=run_mode)
             root_cause = rc_agent.analyze(finding, impact, evidence_bundle)
+            if task_info:
+                task_info.complete_stage(3, f"根因分析完成: {root_cause.root_cause.summary[:80]}")
         except Exception as exc:
+            if task_info:
+                task_info.add_event("error", f"根因分析异常: {exc}", stage=3)
             root_cause = _fallback_root_cause(finding, root_cause_ctx, exc)
 
         # ── 3. 修复循环 (Remediation → Patch → Validation → Report) ──
-        task_manager.update(task_id, progress="制定修复方案并生成补丁...", stage=4)
+        task_info = task_manager.update(task_id, progress="启动修复循环...", stage=4)
+        if task_info:
+            task_info.start_stage(4, "修复循环", attempt=1)
         from .failure_analysis import FailureAnalysisAgent
         from .models import PatchGenerationPolicy
         from .orchestration import PatchRepairLoopOrchestrator
@@ -913,43 +982,71 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
         from .validation import ValidationToolchain
         from .execution import WorkspaceValidationExecutor
 
-        max_attempts = int(body.get("max_attempts") or 2)
+        max_attempts = int(body.get("max_attempts") or (1 if fast_mode else 2))
 
         validation_commands = body.get("validation_commands") or {}
         validation_executor = WorkspaceValidationExecutor(
             workspace=workspace,
             commands=validation_commands,
             timeout_seconds=int(body.get("validation_timeout") or 300),
+            source_files=_as_flat_source_dict(body.get("source_files")),
         )
+
+        # 进度回调：将 orchestrator 内各子阶段实时同步到 Web UI
+        def _loop_progress(msg: str, _stage: int | None = None) -> None:
+            info = task_manager.update(task_id, progress=msg, stage=4)
+            if info:
+                info.add_event("progress", msg, stage=4)
+                # 从进度消息中尝试提取当前目标文件
+                for marker in ("生成补丁: ", "目标文件: ", "generating: ", "patching: "):
+                    if marker in msg.lower():
+                        info.current_target = msg.lower().split(marker, 1)[-1].split(",")[0].strip()
+                        break
+
         loop = PatchRepairLoopOrchestrator(
             remediation_agent=RemediationPlanAgent(
                 llm=llm,
                 workspace=workspace,
-                prefer_static=False,  # 始终使用 LLM Agent 进行修复方案推理
-                max_turns=10 if not fast_mode else 6,
+                prefer_static=fast_mode,
+                pipeline_mode=run_mode,
             ),
-            patch_generation_agent=PatchGenerationAgent(PatchGenerationPolicy(), llm=llm, workspace=workspace),
+            patch_generation_agent=PatchGenerationAgent(
+                PatchGenerationPolicy(), llm=llm, workspace=workspace,
+                pipeline_mode=run_mode,
+            ),
             validation_toolchain=ValidationToolchain(executor=validation_executor),
-            failure_analysis_agent=FailureAnalysisAgent(llm=llm, workspace=workspace),
+            failure_analysis_agent=FailureAnalysisAgent(
+                llm=llm, workspace=workspace, pipeline_mode=run_mode,
+            ),
             report_agent=RemediationReportAgent(),
+            root_cause_agent=rc_agent,
             max_attempts=max_attempts,
+            progress_callback=_loop_progress,
         )
-        loop.patch_generation_agent.max_turns = 12 if not fast_mode else 8
-        loop.failure_analysis_agent.max_turns = 6 if not fast_mode else 4
 
         try:
             result = loop.run(
                 finding, impact, root_cause, eng, repo, sources,
                 [tool_results], evidence_bundle,
             )
+            task_info = task_manager.get(task_id)
+            if task_info:
+                task_info.complete_stage(4, f"修复循环完成: {result.status.value}")
         except Exception as loop_exc:
             # 循环失败时生成回退的修复方案用于报告展示
+            task_info = task_manager.get(task_id)
+            if task_info:
+                task_info.add_event("error", f"修复循环异常: {loop_exc}", stage=4)
             fallback_plan = _fallback_remediation_plan(finding, impact, root_cause, eng, loop_exc)
             output: dict[str, Any] = {
                 "finding": finding.to_dict(),
                 "impact": impact.to_dict(),
                 "root_cause": root_cause.to_dict(),
                 "evidence_bundle": evidence_bundle.to_dict(),
+                "reasoning_trace": {
+                    "impact": impact_agent.last_execution.to_dict(),
+                    "root_cause": rc_agent.last_execution.to_dict(),
+                },
                 "remediation_plan": fallback_plan.to_dict(),
                 "status": "error",
                 "repository_context": body.get("repository_context"),
@@ -971,6 +1068,13 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             "status": result.status.value,
             "run_mode": run_mode,
             "repository_context": body.get("repository_context"),
+            "reasoning_trace": {
+                "impact": impact_agent.last_execution.to_dict(),
+                "root_cause": rc_agent.last_execution.to_dict(),
+                "remediation": loop.remediation_agent.last_execution.to_dict(),
+                "patch": loop.patch_generation_agent.last_execution.to_dict(),
+                "failure": loop.failure_analysis_agent.last_execution.to_dict(),
+            },
         }
         if result.attempts:
             attempt = result.attempts[-1]

@@ -21,5 +21,51 @@
       "dependency_index_ready": false,
       "semantic_index_ready": false
     }
+  },
+  "25fae10f1b82": {
+    "id": "25fae10f1b82",
+    "name": "airflow-2.8.0",
+    "provider": "local",
+    "url": "https://github.com/apache/airflow.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\deserialization\\airflow-2.8.0",
+    "git_root": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\deserialization\\airflow-2.8.0",
+    "default_branch": "HEAD",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "db2b75c233e3",
+      "last_indexed_at": "2026-07-14 16:43",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  },
+  "10fc17624074": {
+    "id": "10fc17624074",
+    "name": "filelock-3.20.0",
+    "provider": "local",
+    "url": "https://github.com/tox-dev/filelock.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\race-condition\\filelock-3.20.0",
+    "git_root": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\race-condition\\filelock-3.20.0",
+    "default_branch": "HEAD",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "f7c3f8ea7def",
+      "last_indexed_at": "2026-07-14 16:51",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
   }
 }

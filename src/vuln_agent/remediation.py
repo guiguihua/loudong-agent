@@ -6,10 +6,18 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .agent import BaseAgent, create_default_tools
+from .reasoning import (
+    PipelineMode,
+    ReasoningMode,
+    StageExecution,
+    normalize_pipeline_mode,
+    stage_policy,
+)
 from .models import (
     CompatibilityAssessment,
     DependencyUpgradePlan,
@@ -28,6 +36,7 @@ from .models import (
     RollbackPlan,
     RootCauseAssessment,
     Severity,
+    SourceFile,
     TestPlanItem,
 )
 
@@ -76,18 +85,28 @@ class RemediationPlanAgent(BaseAgent):
         llm: LLMBackend | None = None,
         workspace: Path | None = None,
         prefer_static: bool = False,
-        max_turns: int = 12,
+        max_turns: int | None = None,
+        pipeline_mode: str | PipelineMode = PipelineMode.BALANCED,
     ):
         ws = workspace or Path.cwd()
+        self.pipeline_mode = normalize_pipeline_mode(pipeline_mode)
+        self.policy = stage_policy("remediation", self.pipeline_mode)
         super().__init__(
             name="RemediationPlan",
             system_prompt=REMEDIATION_AGENT_PROMPT,
             tools=create_default_tools(ws),
             llm=llm,
-            max_turns=max_turns,
+            max_turns=max_turns or self.policy.max_turns,
             workspace=ws,
+            reasoning_mode=self.policy.deep_path.value,
+            tool_budget=dict(self.policy.tool_budget),
+            no_progress_limit=self.policy.no_progress_limit,
+            max_output_tokens=self.policy.max_output_tokens,
         )
         self.prefer_static = prefer_static
+        self.last_execution = StageExecution(
+            "remediation", self.pipeline_mode.value, self.policy.fast_path.value
+        )
 
     def plan(
         self,
@@ -97,6 +116,7 @@ class RemediationPlanAgent(BaseAgent):
         engineering: EngineeringContext | None = None,
         failure_analysis: FailureAnalysisResult | None = None,
         evidence_bundle: EvidenceBundle | None = None,
+        source_files: list[SourceFile] | None = None,
     ) -> RemediationPlan:
         """运行 Remediation Plan Agent。"""
         from .llm import REMEDIATION_PLAN_SCHEMA
@@ -106,20 +126,574 @@ class RemediationPlanAgent(BaseAgent):
         if self.prefer_static:
             static_plan = self._static_plan(finding, impact, root_cause, engineering, failure_analysis)
             if static_plan is not None:
-                return static_plan
+                self.last_execution = StageExecution(
+                    "remediation", self.pipeline_mode.value, ReasoningMode.PLAN_SELECT.value,
+                    details={"planner": "deterministic_template"},
+                )
+                return self._reconcile_plan_paths(
+                    static_plan, finding, root_cause, evidence_bundle, source_files
+                )
 
         task = self._build_task(
             finding, impact, root_cause, engineering, failure_analysis, evidence_bundle
         )
-        raw = self.run(task)
+        context_gaps = self._context_gaps(
+            root_cause, engineering, evidence_bundle, failure_analysis
+        )
+        use_bounded_react = (
+            self.policy.allow_escalation
+            and bool(context_gaps)
+            and not self._gaps_are_unresolvable_by_search(context_gaps)
+        )
+        if use_bounded_react:
+            try:
+                raw = self.run(
+                    task + self._ranking_instructions(),
+                    context={
+                        "reasoning_mode": "bounded_react_then_plan_and_solve",
+                        "context_gaps": context_gaps,
+                        "tool_budget": self.policy.tool_budget,
+                        "stop_condition": "gaps resolved or tool budget exhausted; then rank and select a plan",
+                    },
+                )
+            except Exception as exc:
+                fallback = self._static_plan(
+                    finding, impact, root_cause, engineering, failure_analysis
+                )
+                if fallback is None:
+                    raise
+                # Discard generic target expansion.  Path reconciliation will
+                # rebuild the minimum executable change set from the confirmed
+                # primary root-cause file.
+                fallback.planned_changes = []
+                fallback.patch_boundaries.allowed_files = []
+                fallback.unknowns = list(dict.fromkeys([
+                    *fallback.unknowns,
+                    f"LLM remediation finalization failed; deterministic root-cause plan used: {exc}",
+                ]))
+                fallback.assumptions = list(dict.fromkeys([
+                    *fallback.assumptions,
+                    "deterministic_root_cause_plan_after_bounded_reasoning_failure",
+                ]))
+                fallback.needs_human_review = True
+                self.last_execution = StageExecution(
+                    "remediation", self.pipeline_mode.value, ReasoningMode.BOUNDED_REACT.value,
+                    escalated=True,
+                    escalation_reasons=context_gaps,
+                    llm_calls=int(self.last_run_stats.get("llm_calls", 0)),
+                    tool_calls=dict(self.last_run_stats.get("tool_calls", {})),
+                    stopped_reason=self.last_run_stats.get("stopped_reason") or "structured_finalization_failed",
+                    details={
+                        "final_decision": "deterministic_root_cause_plan",
+                        "fallback_reason": str(exc),
+                    },
+                )
+                return self._reconcile_plan_paths(
+                    fallback, finding, root_cause, evidence_bundle, source_files
+                )
+            self.last_execution = StageExecution(
+                "remediation", self.pipeline_mode.value, ReasoningMode.BOUNDED_REACT.value,
+                escalated=True,
+                escalation_reasons=context_gaps,
+                llm_calls=int(self.last_run_stats.get("llm_calls", 0)),
+                tool_calls=dict(self.last_run_stats.get("tool_calls", {})),
+                stopped_reason=self.last_run_stats.get("stopped_reason"),
+                details={"final_decision": "plan_and_solve_with_candidate_ranking"},
+            )
+        else:
+            raw = self._plan_select_single_shot(task)
+            self.last_execution = StageExecution(
+                "remediation", self.pipeline_mode.value, ReasoningMode.PLAN_SELECT.value,
+                escalation_reasons=context_gaps,
+                llm_calls=1,
+                details={
+                    "final_decision": "generate_rank_select",
+                    "candidate_rankings": raw.get("candidate_rankings", []) if isinstance(raw, dict) else [],
+                },
+            )
 
         if "_raw_output" in raw:
-            # 主分析未输出结构化 JSON → 尝试二次提取
-            extracted = self._extract_plan_from_raw(
-                raw["_raw_output"], finding, root_cause
+            # Use LLM re-extraction (was dead code, now wired in).
+            extracted = self._extract_plan_from_raw(raw["_raw_output"], finding, root_cause)
+            plan = self._dict_to_plan(
+                finding, impact, root_cause, engineering, extracted, failure_analysis
             )
-            return self._dict_to_plan(finding, impact, root_cause, engineering, extracted, failure_analysis)
-        return self._dict_to_plan(finding, impact, root_cause, engineering, raw, failure_analysis)
+            return self._reconcile_plan_paths(
+                plan, finding, root_cause, evidence_bundle, source_files
+            )
+        plan = self._dict_to_plan(finding, impact, root_cause, engineering, raw, failure_analysis)
+        rankings = raw.get("candidate_rankings", []) if isinstance(raw, dict) else []
+        if not 2 <= len(rankings) <= 3:
+            plan.needs_human_review = True
+            plan.unknowns.append("candidate ranking incomplete: expected 2-3 remediation strategies")
+            plan.unknowns = list(dict.fromkeys(plan.unknowns))
+        return self._reconcile_plan_paths(
+            plan, finding, root_cause, evidence_bundle, source_files
+        )
+
+    @staticmethod
+    def _reconcile_plan_paths(
+        plan: RemediationPlan,
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+        evidence_bundle: EvidenceBundle | None,
+        source_files: list[SourceFile] | None,
+    ) -> RemediationPlan:
+        """Resolve planned changes to real repository files before patching.
+
+        LLM plans may contain prose such as ``config.py (or equivalent)`` or
+        combine several alternatives in a single ``file`` field.  Such values
+        are not patch targets.  Resolve exact/suffix matches against the files
+        loaded for this run and, when every proposed path is invalid, recover a
+        minimal plan from the confirmed root-cause source/sink evidence.
+        """
+        known_paths = RemediationPlanAgent._known_repository_paths(
+            evidence_bundle, source_files
+        )
+        if not known_paths:
+            # Human-reference patches must only target files confirmed in the
+            # supplied repository inventory.
+            plan.status = RemediationPlanStatus.NEEDS_CONTEXT
+            plan.unknowns = list(dict.fromkeys([
+                *plan.unknowns,
+                "repository path inventory is unavailable; candidate patch generation is unsafe",
+            ]))
+            plan.needs_human_review = True
+            plan.patch_boundaries.allowed_files = []
+            return plan
+
+        valid_changes: list[PlannedChange] = []
+        invalid_paths: list[str] = []
+        seen: set[str] = set()
+        for change in plan.planned_changes:
+            if RemediationPlanAgent._is_descriptive_path(change.file):
+                invalid_paths.append(change.file)
+                continue
+            resolved = RemediationPlanAgent._resolve_repository_path(change.file, known_paths)
+            if resolved is None:
+                invalid_paths.append(change.file)
+                continue
+            # A source repository must be fixed in source.  Do not turn a
+            # report's "upgrade to fixed release" recommendation into a
+            # self-dependency edit unless this finding is actually SCA data.
+            if (
+                change.change_type == "dependency"
+                and finding.dependency is None
+                and root_cause.root_cause_category.value != "vulnerable_dependency"
+            ):
+                invalid_paths.append(change.file)
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            valid_changes.append(PlannedChange(
+                file=resolved,
+                change_type=change.change_type,
+                description=change.description,
+                reason=change.reason,
+                risk_level=change.risk_level,
+            ))
+
+        if not valid_changes:
+            for path in RemediationPlanAgent._root_cause_change_paths(
+                finding, root_cause, evidence_bundle, known_paths
+            ):
+                if path in seen:
+                    continue
+                seen.add(path)
+                valid_changes.append(PlannedChange(
+                    file=path,
+                    change_type="code",
+                    description="在已确认的根因位置恢复缺失的安全控制。",
+                    reason=(
+                        root_cause.root_cause.missing_control
+                        or root_cause.security_invariant
+                        or root_cause.root_cause.summary
+                    ),
+                    risk_level=Severity.MEDIUM,
+                ))
+
+        if not valid_changes:
+            plan.status = RemediationPlanStatus.NEEDS_CONTEXT
+            plan.needs_human_review = True
+            plan.unknowns = list(dict.fromkeys([
+                *plan.unknowns,
+                "no planned change resolves to a confirmed repository file",
+            ]))
+            plan.patch_boundaries.allowed_files = []
+            return plan
+
+        if invalid_paths:
+            for path in invalid_paths:
+                plan.rejected_alternatives.append(RejectedAlternative(
+                    alternative=f"修改未解析路径 {path}",
+                    reason="该值不是当前仓库中唯一存在的文件，不能作为候选补丁目标。",
+                ))
+            plan.assumptions = list(dict.fromkeys([
+                *plan.assumptions,
+                "planned_change_paths_reconciled_with_repository_inventory",
+            ]))
+            plan.risk_points = list(dict.fromkeys([
+                *plan.risk_points,
+                "LLM 提出的描述性或不存在路径已被确定性路径门禁移出候选补丁。",
+            ]))
+            plan.needs_human_review = True
+
+        plan.planned_changes = valid_changes
+        plan.patch_boundaries.allowed_files = [change.file for change in valid_changes]
+        plan.patch_boundaries.maximum_changed_files = max(
+            len(valid_changes), plan.patch_boundaries.maximum_changed_files
+        )
+
+        # ── 根因覆盖检查：确保 planned_changes 覆盖所有 causally-related 文件 ──
+        from .root_cause import RootCauseAnalysisAgent
+        causal_files = RootCauseAnalysisAgent.get_causal_files(root_cause)
+        planned_files = {c.file.replace("\\", "/").lstrip("./") for c in valid_changes}
+        uncovered = [
+            f for f in causal_files
+            if f not in planned_files
+            and not any(f.endswith("/" + pf) or pf.endswith("/" + f) for pf in planned_files)
+        ]
+        if uncovered:
+            # 尝试从 known_paths 中解析未覆盖文件
+            for uf in uncovered:
+                resolved = RemediationPlanAgent._resolve_repository_path(uf, known_paths)
+                if resolved and resolved not in seen:
+                    seen.add(resolved)
+                    valid_changes.append(PlannedChange(
+                        file=resolved,
+                        change_type="code",
+                        description=f"根因因果链涉及的文件: {uf}",
+                        reason=(
+                            f"该文件在 source→sink→affected_code 链中，"
+                            f"修复根因 '{root_cause.root_cause.summary[:80]}' 可能需要修改此文件"
+                        ),
+                        risk_level=Severity.MEDIUM,
+                    ))
+            # 仍未覆盖的作为风险点
+            still_uncovered = [
+                f for f in uncovered
+                if not any(
+                    f.replace("\\", "/").lstrip("./") == c.file.replace("\\", "/").lstrip("./")
+                    for c in valid_changes
+                )
+            ]
+            if still_uncovered:
+                plan.risk_points = list(dict.fromkeys([
+                    *plan.risk_points,
+                    f"根因覆盖缺口: {len(still_uncovered)} 个因果链文件不在修复计划中: "
+                    f"{', '.join(still_uncovered[:5])}",
+                ]))
+                plan.needs_human_review = True
+
+        # Rebuild allowed_files after coverage expansion
+        plan.planned_changes = valid_changes
+        plan.patch_boundaries.allowed_files = [change.file for change in valid_changes]
+        plan.patch_boundaries.maximum_changed_files = max(
+            len(valid_changes), plan.patch_boundaries.maximum_changed_files
+        )
+
+        if not any(
+            "security" in item.test_type.lower() or "安全" in item.test_type
+            for item in plan.required_tests
+        ):
+            plan.required_tests.append(TestPlanItem(
+                name=f"{finding.finding_id} exploit regression",
+                test_type="security_regression",
+                target=valid_changes[0].file,
+                assertion=(
+                    "the reported exploit condition is rejected at the confirmed trust boundary, "
+                    "while the corresponding legitimate operation remains supported"
+                ),
+            ))
+            plan.risk_points = list(dict.fromkeys([
+                *plan.risk_points,
+                "The LLM omitted a security regression test; a mandatory exploit/legitimate-behavior test was added.",
+            ]))
+            plan.needs_human_review = True
+        if not any("business" in item.test_type.lower() for item in plan.required_tests):
+            plan.required_tests.append(TestPlanItem(
+                name=f"{finding.finding_id} compatibility regression",
+                test_type="business_regression",
+                target=valid_changes[0].file,
+                assertion="existing public API defaults and legitimate inputs preserve their previous behavior",
+            ))
+        if root_cause.confidence_score < 0.7:
+            plan.risk_points = list(dict.fromkeys([
+                *plan.risk_points,
+                "Root-cause confidence is below 0.70; patch placement requires explicit human review.",
+            ]))
+            plan.needs_human_review = True
+        # 低置信度(<0.45)时扩大范围，不要压窄
+        if root_cause.confidence_score < 0.45:
+            plan.risk_points = list(dict.fromkeys([
+                *plan.risk_points,
+                "根因置信度 < 0.45: source/sink 未确认，修复范围已自动扩大。"
+                "需要人工确认实际修复目标文件。",
+            ]))
+            plan.needs_human_review = True
+
+        # ── 符号存在性验证（修复方案引用的 API/异常必须真实存在）──
+        if source_files and hasattr(plan, 'planned_changes') and plan.planned_changes:
+            symbol_issues = RemediationPlanAgent._verify_plan_symbols_exist(
+                plan, source_files,
+            )
+            if symbol_issues:
+                plan.risk_points = list(dict.fromkeys([
+                    *plan.risk_points,
+                    *symbol_issues,
+                ]))
+                plan.needs_human_review = True
+
+        plan.status = RemediationPlanStatus.READY
+        return plan
+
+    @staticmethod
+    def _verify_plan_symbols_exist(
+        plan: RemediationPlan,
+        source_files: list[SourceFile],
+    ) -> list[str]:
+        """Check that API symbols mentioned in planned changes exist in source.
+
+        Scans ``description`` and ``reason`` fields of every PlannedChange
+        for CamelCase identifiers that look like exception / class names.
+        Each candidate is checked against a combined symbol index built
+        from all source files.  Stdlib exception names are whitelisted.
+
+        Returns:
+            List of human-readable issue strings (empty = all referenced
+            symbols verified, or no symbols could be extracted).
+        """
+        import re as _re
+
+        # Build combined symbol index from source files
+        all_symbols: set[str] = set()
+        try:
+            from .patching import PatchGenerationAgent
+            exports = PatchGenerationAgent._extract_source_exports(source_files)
+            for symbols in exports.values():
+                all_symbols.update(symbols)
+        except Exception:
+            return []  # If symbol extraction fails, don't block the plan
+
+        if not all_symbols:
+            return []
+
+        # Collect symbol-like tokens from planned changes
+        mentioned: set[str] = set()
+        for change in plan.planned_changes:
+            for field in (change.description, change.reason):
+                if not field:
+                    continue
+                # Match CamelCase exception/error class names only
+                for m in _re.finditer(
+                    r'\b([A-Z][a-zA-Z0-9]*(?:Error|Exception|Warning))\b',
+                    str(field),
+                ):
+                    mentioned.add(m.group(1))
+
+        if not mentioned:
+            return []
+
+        # Python stdlib exception/error/warning classes
+        _STDLIB_ERRORS: set[str] = {
+            "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError",
+            "RuntimeError", "OSError", "IOError", "ImportError", "StopIteration",
+            "NotImplementedError", "MemoryError", "SystemError", "ReferenceError",
+            "OverflowError", "ZeroDivisionError", "AssertionError", "EOFError",
+            "FloatingPointError", "GeneratorExit", "KeyboardInterrupt", "SystemExit",
+            "UnboundLocalError", "UnicodeError", "UnicodeDecodeError",
+            "UnicodeEncodeError", "UnicodeTranslateError", "Warning",
+            "DeprecationWarning", "PendingDeprecationWarning", "FutureWarning",
+            "ImportWarning", "ResourceWarning", "BytesWarning", "Exception",
+            "BaseException", "ArithmeticError", "BufferError", "LookupError",
+            "PermissionError", "FileNotFoundError", "NotADirectoryError",
+            "ConnectionError", "TimeoutError", "BlockingIOError",
+            "FileExistsError", "IsADirectoryError", "ChildProcessError",
+            "InterruptedError", "ProcessLookupError", "BrokenPipeError",
+            "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError",
+            "ModuleNotFoundError", "RecursionError", "StopAsyncIteration",
+            "TabError", "IndentationError", "SyntaxError", "NameError",
+            "UnicodeWarning", "BytesWarning", "SyntaxWarning", "RuntimeWarning",
+            "UserWarning", "EncodingWarning",
+        }
+
+        issues: list[str] = []
+        for sym in sorted(mentioned):
+            if sym in _STDLIB_ERRORS:
+                continue
+            if sym in all_symbols:
+                continue
+            issues.append(
+                f"修复方案引用了未在源码中找到的异常/类 '{sym}'。"
+                f"请确认该符号在源码中存在，或改用标准库中已有的异常类型。"
+            )
+
+        return issues
+
+    @staticmethod
+    def _known_repository_paths(
+        evidence_bundle: EvidenceBundle | None,
+        source_files: list[SourceFile] | None,
+    ) -> list[str]:
+        paths = [item.path for item in (source_files or []) if item.path]
+        if evidence_bundle:
+            paths.extend(item.path for item in evidence_bundle.target_files if item.path)
+            paths.extend(item.path for item in evidence_bundle.code_slices if item.path)
+            paths.extend(item.path for item in evidence_bundle.source_candidates if item.path)
+            paths.extend(item.path for item in evidence_bundle.sink_candidates if item.path)
+            paths.extend(item.path for item in evidence_bundle.test_evidence if item.path)
+            paths.extend(item.path for item in evidence_bundle.config_evidence if item.path)
+            paths.extend(item.path for item in evidence_bundle.dependency_evidence if item.path)
+        return list(dict.fromkeys(
+            path.replace("\\", "/").lstrip("./") for path in paths if path
+        ))
+
+    @staticmethod
+    def _is_descriptive_path(path: str) -> bool:
+        value = (path or "").strip().lower()
+        if not value or value == "unknown":
+            return True
+        markers = (
+            " / ", " 或 ", " or ", "—", "(if ", "if using",
+            "equivalent", "all modules", "documentation /", "*", "...",
+        )
+        return any(marker in value for marker in markers)
+
+    @staticmethod
+    def _resolve_repository_path(path: str, known_paths: list[str]) -> str | None:
+        requested = path.replace("\\", "/").strip().lstrip("./")
+        exact = [item for item in known_paths if item == requested]
+        if len(exact) == 1:
+            return exact[0]
+        suffix = [
+            item for item in known_paths
+            if item.endswith("/" + requested) or requested.endswith("/" + item)
+        ]
+        return suffix[0] if len(suffix) == 1 else None
+
+    @staticmethod
+    def _root_cause_change_paths(
+        finding: NormalizedVulnerability,
+        root_cause: RootCauseAssessment,
+        evidence_bundle: EvidenceBundle | None,
+        known_paths: list[str],
+    ) -> list[str]:
+        rc = root_cause.root_cause
+        primary_markers = ("root", "primary", "核心", "根因", "缺陷", "control", "guard")
+        primary_candidates = [
+            item.file for item in root_cause.affected_code
+            if any(marker in (item.role or "").lower() for marker in primary_markers)
+        ]
+        mechanism_candidates: list[str] = []
+        if rc.sink and rc.sink.file:
+            mechanism_candidates.append(rc.sink.file)
+        if rc.source and rc.source.file:
+            mechanism_candidates.append(rc.source.file)
+        reported_candidates: list[str] = []
+        if evidence_bundle:
+            reported_candidates.extend(item.path for item in evidence_bundle.target_files)
+        reported_candidates.extend(location.file for location in finding.locations if location.file)
+
+        # Prefer files explicitly labelled as the primary/root control point.
+        # Only fall back to source/sink or report locations when no such file
+        # resolves, which avoids turning every affected caller into a patch.
+        for candidates in (primary_candidates, mechanism_candidates, reported_candidates):
+            resolved: list[str] = []
+            for candidate in candidates:
+                if RemediationPlanAgent._is_descriptive_path(candidate):
+                    continue
+                path = RemediationPlanAgent._resolve_repository_path(candidate, known_paths)
+                if path and path not in resolved:
+                    resolved.append(path)
+            if resolved:
+                return resolved
+        return []
+
+    def _plan_select_single_shot(self, task: str) -> dict:
+        from .llm import REMEDIATION_PLAN_SCHEMA
+
+        try:
+            raw = self.llm.reason(  # type: ignore[union-attr]
+                user_prompt=task + self._ranking_instructions(),
+                system_prompt=(
+                    "执行 Plan-and-Solve + Generate-Rank-Select。不要调用工具。"
+                    "候选方案必须恢复已确认安全不变量，并根据证据选择首选方案。"
+                ),
+                output_schema=REMEDIATION_PLAN_SCHEMA,
+                temperature=0.1,
+                max_tokens=self.policy.max_output_tokens,
+            )
+            return RemediationPlanAgent._normalize_single_shot(raw)
+        except Exception as exc:
+            return {"_raw_output": f"single-shot remediation failed: {exc}"}
+
+    @staticmethod
+    def _normalize_single_shot(raw: dict | str) -> dict:
+        """Handle _schema_missing: convert to _raw_output so the caller
+        triggers fallback instead of accepting an incomplete plan."""
+        if isinstance(raw, dict) and raw.pop("_schema_missing", None):
+            partial = {k: v for k, v in raw.items() if not k.startswith("_")}
+            raw["_raw_output"] = json.dumps(partial, ensure_ascii=False, indent=2)
+            raw["_partial_structured"] = partial
+            return raw
+        return raw if isinstance(raw, dict) else {"_raw_output": str(raw)}
+
+    @staticmethod
+    def _ranking_instructions() -> str:
+        return """
+
+## Plan-and-Solve + Candidate Ranking
+先生成 2-3 个候选修复策略，再按以下权重比较后选择首选方案：
+- 完整切断漏洞因果链：35%
+- 恢复安全不变量：25%
+- 业务兼容性：15%
+- 可验证性：15%
+- 改动和回滚风险：10%
+最终 planned_changes 只能来自首选方案。纵深防御、日志和无关架构改造放入 rejected_alternatives。
+
+## 源码契约与补丁边界门禁
+- 每个 planned_change 必须指出当前文件中真实存在的符号，以及它在因果链中的职责。
+- 不得仅因漏洞报告建议某个参数/API 就假设源码支持它；必须核对真实签名、构造器传值和消费方。
+- 新增参数、字段或类型元数据时，必须证明存在实际消费方，并把必要的生产者/消费者变更一起纳入方案；否则拒绝该方案。
+- 不得把测试路由、示例应用或仓库别名当作生产服务文件。
+- 优先在接受不安全值的最小信任边界修复，避免改变无关公共 API 默认行为。
+- 高危代码漏洞必须同时规划：攻击载荷被拒绝的安全测试，以及合法输入保持兼容的正向测试。"""
+
+    @staticmethod
+    def _context_gaps(root_cause, engineering, evidence_bundle, failure_analysis) -> list[str]:
+        gaps: list[str] = []
+        if evidence_bundle is None or not evidence_bundle.target_files:
+            gaps.append("target_file_context_missing")
+        if evidence_bundle and not evidence_bundle.test_evidence and not engineering.available_test_commands:
+            gaps.append("test_framework_or_test_target_missing")
+        if root_cause.confidence_score < 0.5:
+            gaps.append("root_cause_confidence_below_0.5")
+        if root_cause.unknowns:
+            gaps.append("root_cause_has_unknowns")
+        if failure_analysis and failure_analysis.requires_root_cause_recheck:
+            gaps.append("previous_failure_requires_source_recheck")
+        return list(dict.fromkeys(gaps))
+
+    @staticmethod
+    def _gaps_are_unresolvable_by_search(gaps: list[str]) -> bool:
+        """Returns True when Bounded ReAct tool exploration won't help close the gaps.
+
+        ``target_file_context_missing`` means the EvidenceCollector could not
+        match any reported file path to a source file that was actually
+        supplied.  No amount of read_file / search_code / list_dir calls will
+        conjure a file that isn't there.  The agent already receives the full
+        source_files list and evidence bundle in its prompt — it should plan
+        from what IS available rather than burn turns searching for what isn't.
+        """
+        if not gaps:
+            return False
+        # Gaps that tool exploration can actually resolve:
+        actionable = {
+            "test_framework_or_test_target_missing",
+            "previous_failure_requires_source_recheck",
+        }
+        return not any(g in actionable for g in gaps)
 
     def _extract_plan_from_raw(
         self,
@@ -175,33 +749,39 @@ class RemediationPlanAgent(BaseAgent):
         finding: NormalizedVulnerability,
         root_cause: RootCauseAssessment,
     ) -> dict:
-        """LLM 不可用时的纯文本回退提取。"""
-        import re
+        """Last-resort extraction when both JSON repair and LLM re-extraction failed.
 
-        # 尝试找到 JSON 块
-        json_match = re.search(r'\{[^{}]*"remediation_goal"[^{}]*\}', raw_text, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'\{[^{}]*"strategies"[^{}]*\}', raw_text, re.DOTALL)
-        if json_match:
-            import json as _json
-            try:
-                return _json.loads(json_match.group(0))
-            except (_json.JSONDecodeError, ValueError):
-                pass
+        Attempts to find the largest valid/reparable JSON object first, then
+        falls back to constructing minimal sensible defaults.
+        """
+        from .json_repair import extract_largest_json_object
 
-        # 从文本提取修复目标
-        goal_match = re.search(
-            r'(?:修复目标|remediation.goal|目标)[：:\s]*(.+?)(?:\n|$)',
-            raw_text, re.IGNORECASE,
-        )
-        goal = goal_match.group(1).strip()[:300] if goal_match else (
-            f"修复 {finding.vulnerability_type} 漏洞，具体方案需人工审查确定。"
-        )
+        # Attempt to find and repair the largest JSON object in the text.
+        obj = extract_largest_json_object(raw_text)
+        if obj is not None and isinstance(obj, dict):
+            # Ensure required fields exist.
+            obj.setdefault("status", "ready")
+            obj.setdefault("strategies", [{
+                "strategy_type": "code_change",
+                "summary": f"针对 {finding.vulnerability_type} 的最小化安全修复",
+                "steps": ["读取受影响文件并定位漏洞触发路径", "在关键位置补全缺失的安全控制", "保持 API 与现有行为不变"],
+                "preferred": True,
+            }])
+            obj.setdefault("planned_changes", [])
+            obj.setdefault("required_tests", [])
+            obj.setdefault("risk_points", ["修复方案从非结构化文本中提取，信息可能不完整", "需要人工审查确认修复精准度"])
+            obj.setdefault("rejected_alternatives", [])
+            obj.setdefault("assumptions", ["从非结构化 LLM 输出中尽力提取"])
+            obj.setdefault("unknowns", ["修复方案的具体实施细节需要人工补充"])
+            obj.setdefault("confidence_score", 0.3)
+            obj.setdefault("needs_human_review", True)
+            return obj
 
+        # True last resort: minimal template.
         vuln_type = finding.vulnerability_type or "unknown vulnerability"
         return {
             "status": "ready",
-            "remediation_goal": goal,
+            "remediation_goal": f"修复 {vuln_type} 漏洞，具体方案需人工审查确定。",
             "strategies": [{
                 "strategy_type": "code_change",
                 "summary": f"针对 {vuln_type} 的最小化安全修复",
@@ -285,7 +865,7 @@ class RemediationPlanAgent(BaseAgent):
 - 受影响文件: {', '.join(locs) if locs else 'unknown'}
 - 证据:
 {evidence_lines}
-- 建议: {finding.recommendation or '未提供'}
+- 报告建议（仅作风险提示，不能替代源码证据，也不能直接转成 planned_changes）: {finding.recommendation or '未提供'}
 - 根因: {rc.summary or '（根因分析未产出有效结果）'}
 - 缺失控制: {rc.missing_control or '（未识别）'}
 - 根因分类: {root_cause.root_cause_category.value}
@@ -307,7 +887,15 @@ class RemediationPlanAgent(BaseAgent):
 ## 确定性 EvidenceBundle（优先使用）
 {format_evidence_bundle(evidence_bundle, max_chars=16000)}
 {fb}
-优先依据 EvidenceBundle 中已确认的目标文件、代码切片、依赖和测试能力制定方案；只有关键修复证据缺失时才补充探索。选择最优修复策略并给出具体步骤。"""
+优先依据 EvidenceBundle 中已确认的目标文件、代码切片、依赖和测试能力制定方案；只有关键修复证据缺失时才补充探索。选择最优修复策略并给出具体步骤。
+
+planned_changes.file 必须是 EvidenceBundle/当前仓库中唯一存在的单个文件路径。禁止填写
+`a.py / b.py`、`or equivalent`、`if using`、`all modules`、目录名或其他描述性占位符。
+当前任务修复的是已加载仓库本身：除非 finding 明确是依赖漏洞，否则不得把“升级到后续版本”
+当成修改当前源码仓库的方案，也不得虚构业务应用的 config、provider 或 route 文件。
+制定方案前必须核对真实 API 契约：方法签名、构造器状态传递、调用顺序、异常和类型定义。
+报告 recommendation 仅是待验证假设。新增参数/字段必须同时证明并覆盖真实消费方；无消费方的改动必须进入 rejected_alternatives。
+至少规划一个漏洞负向测试和一个合法行为正向测试；不得以 compileall 代替行为验证。"""
 
     @staticmethod
     def _static_plan(
@@ -739,6 +1327,10 @@ class RemediationPlanAgent(BaseAgent):
             ))
         if FailureCategory.BUILD_FAILURE in categories:
             plan.compatibility.required_checks.append("re-run failed build command before security validation")
+        if FailureCategory.TEST_HARNESS_FAILURE in categories:
+            plan.compatibility.required_checks.append(
+                "regenerate the test artifact using only APIs and fixtures observed in the supplied repository version"
+            )
 
         plan.risk_points = list(dict.fromkeys(plan.risk_points))
         plan.compatibility.risks = list(dict.fromkeys(plan.compatibility.risks))

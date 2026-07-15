@@ -6,6 +6,7 @@ from .models import (
     ImpactAssessment,
     NormalizedVulnerability,
     PatchCandidate,
+    PatchCandidateStatus,
     PatchValidationStatus,
     RemediationPlan,
     RemediationReport,
@@ -53,7 +54,9 @@ class RemediationReportAgent:
         validation_summary = self._validation_summary(validation)
         test_results = self._test_results(validation)
         security_validation_results = self._security_validation_results(validation)
-        risk_summary = self._risk_summary(remediation_plan, patch_candidate)
+        risk_summary = self._risk_summary(
+            remediation_plan, patch_candidate, validation, impact, root_cause
+        )
         title = f"修复 {finding.vulnerability_type}（{finding.finding_id}）"
         fully_validated = validation.status == PatchValidationStatus.PASSED
         if fully_validated:
@@ -144,9 +147,25 @@ class RemediationReportAgent:
         validation: ValidationToolchainResult,
     ) -> RemediationReport:
         reason = validation.feedback_for_failure_analysis or "验证未通过"
+        generation_blocked = (
+            patch_candidate.status == PatchCandidateStatus.BLOCKED
+            or not patch_candidate.artifacts
+        )
+        if generation_blocked:
+            title = f"{finding.finding_id} 候选补丁生成被阻断"
+            executive = "候选补丁未形成可审查的结构化 diff，外部构建、测试和安全验证尚未开始。"
+            summary = (
+                f"候选补丁 `{patch_candidate.patch_id}` 未成功生成，因此静态预检已停止后续验证。"
+            )
+            review = "请先修复补丁生成或修复计划路径问题，再执行外部验证。"
+        else:
+            title = f"{finding.finding_id} 修复报告生成被阻断"
+            executive = "候选补丁已经生成，但已执行的必要验证未通过。"
+            summary = f"候选补丁 `{patch_candidate.patch_id}` 未通过必要验证。"
+            review = "请先处理验证失败原因，再生成正式修复报告。"
         markdown = (
-            f"# {finding.finding_id} 修复报告生成被阻断\n\n"
-            f"补丁 `{patch_candidate.patch_id}` 未通过验证，因此不能生成正式修复报告。\n\n"
+            f"# {title}\n\n"
+            f"{summary}\n\n"
             f"阻断原因：{reason}\n\n"
             f"## 未验证的候选补丁\n\n"
             f"{RemediationReportAgent._patch_markdown(patch_candidate)}\n"
@@ -156,8 +175,8 @@ class RemediationReportAgent:
             finding_id=finding.finding_id,
             patch_id=patch_candidate.patch_id,
             status=RemediationReportStatus.BLOCKED,
-            title=f"{finding.finding_id} 修复报告生成被阻断",
-            executive_summary="最终修复报告被阻断，因为验证未通过。",
+            title=title,
+            executive_summary=executive,
             root_cause_summary="",
             remediation_summary="",
             changed_files=[],
@@ -166,7 +185,7 @@ class RemediationReportAgent:
             validation_summary=[],
             risk_summary=[],
             rollback_summary="",
-            human_review_focus=["请先处理验证失败原因，再生成正式修复报告。"],
+            human_review_focus=[review],
             pr_description_markdown=markdown,
             ticket_comment_markdown=markdown,
             sections=[],
@@ -347,14 +366,35 @@ class RemediationReportAgent:
         return remediation_plan.rollback.summary
 
     @staticmethod
-    def _risk_summary(remediation_plan: RemediationPlan, patch_candidate: PatchCandidate) -> list[str]:
+    def _risk_summary(
+        remediation_plan: RemediationPlan,
+        patch_candidate: PatchCandidate,
+        validation: ValidationToolchainResult,
+        impact: ImpactAssessment,
+        root_cause: RootCauseAssessment,
+    ) -> list[str]:
+        risks = [*remediation_plan.risk_points, *patch_candidate.risks]
         if remediation_plan.dependency_upgrade:
-            return [
+            risks.extend([
                 "依赖升级可能引入 API 行为变化或传递依赖冲突。",
                 "依赖声明、锁文件和重新构建的制品需要一起验证。",
                 "合入前需要重点审查业务回归和 SCA 复扫结果。",
-            ]
-        return list(dict.fromkeys([*remediation_plan.risk_points, *patch_candidate.risks]))
+            ])
+        for layer in validation.layers:
+            if layer.status in {ToolExecutionStatus.NOT_CONFIGURED, ToolExecutionStatus.SKIPPED}:
+                layer_name = LAYER_NAMES.get(layer.layer, layer.layer.value)
+                risks.append(f"{layer_name}未形成可审计的执行证据，候选补丁不能视为完整验证通过。")
+        if impact.confidence_score < 0.7:
+            risks.append(
+                f"影响面置信度仅为 {impact.confidence_score:.2f}；未确认的服务、入口和调用路径仍需人工核实。"
+            )
+        if root_cause.confidence_score < 0.7:
+            risks.append(
+                f"根因置信度仅为 {root_cause.confidence_score:.2f}；补丁位置和安全不变量仍需人工复核。"
+            )
+        if not any(artifact.patch_type.value == "test" for artifact in patch_candidate.artifacts):
+            risks.append("候选补丁没有测试 artifact，无法证明漏洞被阻断且合法行为保持兼容。")
+        return list(dict.fromkeys(risks))
 
     @staticmethod
     def _validation_summary(validation: ValidationToolchainResult) -> list[str]:

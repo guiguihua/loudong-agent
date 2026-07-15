@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import json
-import traceback
+import hashlib
+import html
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -69,16 +71,32 @@ class BaseAgent:
     llm: LLMBackend | None = None
     max_turns: int = 10
     workspace: Path = field(default_factory=Path.cwd)
+    reasoning_mode: str = "bounded_react"
+    tool_budget: dict[str, int] = field(default_factory=dict)
+    allowed_paths: list[str] = field(default_factory=list)
+    no_progress_limit: int = 2
+    max_fallback_calls: int = 2
+    max_output_tokens: int | None = None
+    last_run_stats: dict[str, Any] = field(default_factory=dict)
 
     # 子类可覆盖，定义最终输出的 JSON Schema
     output_schema: dict[str, Any] | None = None
 
-    def run(self, task: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        task: str,
+        context: dict[str, Any] | None = None,
+        *,
+        continuation_messages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """执行 Agent 任务。
 
         Args:
             task: 用户任务描述
             context: 额外上下文（可选）
+            continuation_messages: 预构建的对话历史（可选）。
+                提供后跳过 _build_initial_messages，直接从此历史继续 ReAct 循环。
+                用于 single-shot 结果续接到深度推理，避免丢弃已有分析。
 
         Returns:
             结构化输出字典（LLM 最后一轮的内容解析为 JSON）
@@ -86,7 +104,19 @@ class BaseAgent:
         if not self.llm:
             raise RuntimeError(f"Agent '{self.name}' 需要 LLM 后端，但 llm 为 None")
 
-        messages = self._build_initial_messages(task, context or {})
+        self.last_run_stats = {
+            "reasoning_mode": self.reasoning_mode,
+            "llm_calls": 0,
+            "tool_calls": {},
+            "stopped_reason": None,
+        }
+        if continuation_messages is not None:
+            messages = list(continuation_messages)
+        else:
+            messages = self._build_initial_messages(task, context or {})
+        tool_call_counts: dict[str, int] = {}
+        seen_search_results: set[str] = set()
+        consecutive_no_progress = 0
 
         # 构建本轮的全部工具（含 submit_final_result）
         active_tools = list(self.tools)
@@ -96,40 +126,104 @@ class BaseAgent:
         for turn in range(1, self.max_turns + 1):
             response = self._call_llm(messages, active_tools)
 
+            # Some OpenAI-compatible reasoning models occasionally render a
+            # function call as XML-like text instead of populating tool_calls.
+            # Treat a strictly recognizable call as a tool action, otherwise
+            # BaseAgent would incorrectly accept it as the final answer.
+            tool_calls = response.tool_calls or self._tool_calls_from_text(
+                response.content or "", active_tools, turn
+            )
+
             # 有工具调用 → 先检查是否调用了 submit_final_result
-            if response.tool_calls:
+            if tool_calls:
                 # 检查是否调用了 submit_final_result（优先处理）
-                for tc in response.tool_calls:
+                for tc in tool_calls:
                     func_name = tc.get("function", {}).get("name", "")
                     if func_name == "submit_final_result":
                         args_str = tc.get("function", {}).get("arguments", "{}")
+                        args_str = args_str if isinstance(args_str, str) else str(args_str)
+
+                        # Tier 1: direct parse → validate required fields.
+                        t1_missing: list[str] | None = None
                         try:
-                            return json.loads(args_str) if isinstance(args_str, str) else args_str
+                            parsed = json.loads(args_str)
+                            t1_missing = self._validate_against_schema(parsed, self.output_schema)
+                            if not t1_missing:
+                                self.last_run_stats["stopped_reason"] = "submitted_result"
+                                return parsed
+                            _safe_print(
+                                f"  [{self.name}] [WARN] submit_final_result 缺少字段: {t1_missing}，尝试修复..."
+                            )
                         except json.JSONDecodeError:
-                            # JSON 解析失败，回退到文本解析
-                            _safe_print(f"  [{self.name}] [WARN] submit_final_result JSON 解析失败，尝试从文本提取")
-                            # 把 args_str 当文本内容处理
-                            return self._parse_final_output(str(args_str))
+                            t1_missing = None
+
+                        # Tier 2: JSON repair → validate required fields.
+                        from .json_repair import repair_json
+                        repaired = repair_json(args_str)
+                        if repaired is not None:
+                            t2_missing = self._validate_against_schema(repaired, self.output_schema)
+                            if not t2_missing:
+                                _safe_print(f"  [{self.name}] [INFO] submit_final_result JSON repaired successfully")
+                                self.last_run_stats["stopped_reason"] = "submitted_result_repaired"
+                                return repaired
+                            _safe_print(
+                                f"  [{self.name}] [WARN] JSON 修复后仍缺少字段: {t2_missing}，重新提交..."
+                            )
+                            missing = t2_missing
+                        else:
+                            # Preserve Tier 1's missing fields if available
+                            missing = t1_missing if t1_missing else ["<JSON 修复失败>"]
+
+                        # Tier 3: Resubmit — give the LLM one chance to fix.
+                        resubmitted = self._try_resubmit_final_result(
+                            args_str, messages, active_tools, missing_fields=missing
+                        )
+                        if resubmitted is not None:
+                            self.last_run_stats["stopped_reason"] = "submitted_result_resubmitted"
+                            return resubmitted
+
+                        # Tier 4: Text extraction (improved).
+                        _safe_print(f"  [{self.name}] [WARN] submit_final_result JSON 解析失败，尝试从文本提取")
+                        return self._parse_final_output(str(args_str))
 
                 # 1. 先添加 assistant 消息（含 tool_calls）
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": response.content,
-                    "tool_calls": response.tool_calls,
+                    "tool_calls": tool_calls,
                 }
                 messages.append(assistant_msg)
 
                 # 2. 执行每个工具，添加 tool 结果消息
-                for tc in response.tool_calls:
-                    tool_msg = self._handle_tool_call(tc)
+                stop_requested = False
+                for tc in tool_calls:
+                    tool_msg = self._handle_tool_call(tc, tool_call_counts)
                     messages.append(tool_msg)
+                    func_name = tc.get("function", {}).get("name", "")
+                    if func_name == "search_code":
+                        content = str(tool_msg.get("content", ""))
+                        fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                        no_result = content.startswith("未找到") or content.startswith("错误:")
+                        if no_result or fingerprint in seen_search_results:
+                            consecutive_no_progress += 1
+                        else:
+                            consecutive_no_progress = 0
+                            seen_search_results.add(fingerprint)
+                        if consecutive_no_progress >= self.no_progress_limit:
+                            self.last_run_stats["stopped_reason"] = "no_new_evidence"
+                            stop_requested = True
+                if stop_requested:
+                    break
                 continue
 
             # 无工具调用 → Agent 完成，解析输出
+            self.last_run_stats["stopped_reason"] = "model_completed"
             return self._parse_final_output(response.content or "")
 
         # 超过 max_turns — 多级回退策略
-        _safe_print(f"  [{self.name}] [WARN] 达 max_turns={self.max_turns}，尝试回退策略...")
+        if not self.last_run_stats.get("stopped_reason"):
+            self.last_run_stats["stopped_reason"] = "max_turns"
+        _safe_print(f"  [{self.name}] [WARN] 受限推理停止（{self.last_run_stats['stopped_reason']}），尝试最终结构化输出...")
 
         # 回退 1：追加强制输出指令，不带工具再试一次
         force_msg = (
@@ -147,7 +241,13 @@ class BaseAgent:
         except Exception:
             pass
 
-        # 回退 2：用纯净上下文重新调用（避免被历史 tool_calls 污染）
+        if self.max_fallback_calls <= 1:
+            raise RuntimeError(
+                f"Agent '{self.name}' 受限推理停止，最终结构化输出失败: "
+                f"{self.last_run_stats['stopped_reason']}"
+            )
+
+        # 回退 2：仅供显式允许的兼容模式使用
         _safe_print(f"  [{self.name}] [WARN] 回退1失败，尝试纯净上下文...")
         try:
             clean_messages: list[dict[str, Any]] = [
@@ -171,6 +271,74 @@ class BaseAgent:
             f"所有回退策略均失败"
         )
 
+    @staticmethod
+    def _tool_calls_from_text(
+        content: str,
+        active_tools: list[Tool],
+        turn: int,
+    ) -> list[dict[str, Any]] | None:
+        """Convert legacy ``<tool><arg>...</arg></tool>`` text to tool calls.
+
+        This adapter is deliberately narrow: the outer tag must name an
+        active non-submit tool and every required argument must be present.
+        Arbitrary prose or incomplete XML is still treated as normal model
+        output and will fail structured-output validation.
+        """
+        if not content or "<" not in content:
+            return None
+        tools_by_name = {
+            tool.name: tool for tool in active_tools
+            if tool.name != "submit_final_result"
+        }
+        if not tools_by_name:
+            return None
+
+        names = "|".join(re.escape(name) for name in sorted(tools_by_name, key=len, reverse=True))
+        outer = re.compile(
+            rf"<(?P<name>{names})>\s*(?P<body>[\s\S]*?)\s*</(?P=name)>",
+            re.IGNORECASE,
+        )
+        calls: list[dict[str, Any]] = []
+        for index, match in enumerate(outer.finditer(content), 1):
+            matched_name = match.group("name")
+            canonical_name = next(
+                (name for name in tools_by_name if name.lower() == matched_name.lower()),
+                matched_name,
+            )
+            tool = tools_by_name[canonical_name]
+            body = match.group("body")
+            arguments: dict[str, Any] = {}
+            for parameter, schema in tool.parameters.items():
+                value_match = re.search(
+                    rf"<{re.escape(parameter)}>\s*([\s\S]*?)\s*</{re.escape(parameter)}>",
+                    body,
+                    re.IGNORECASE,
+                )
+                if not value_match:
+                    continue
+                raw_value = html.unescape(value_match.group(1).strip())
+                value_type = schema.get("type") if isinstance(schema, dict) else None
+                if value_type == "integer":
+                    try:
+                        arguments[parameter] = int(raw_value)
+                    except ValueError:
+                        continue
+                elif value_type == "boolean":
+                    arguments[parameter] = raw_value.lower() in {"1", "true", "yes"}
+                else:
+                    arguments[parameter] = raw_value
+            if any(required not in arguments for required in tool.required):
+                continue
+            calls.append({
+                "id": f"text-tool-{turn}-{index}",
+                "type": "function",
+                "function": {
+                    "name": canonical_name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            })
+        return calls or None
+
     # ── 内部方法 ────────────────────────────────────────────────────────
 
     def _build_initial_messages(
@@ -178,6 +346,8 @@ class BaseAgent:
     ) -> list[dict[str, Any]]:
         """构建初始 messages（system + user）。"""
         system = self.system_prompt
+        if context:
+            system += "\n\n## 受限推理控制\n" + json.dumps(context, ensure_ascii=False, indent=2)
         if self.output_schema:
             schema_str = json.dumps(self.output_schema, ensure_ascii=False, indent=2)
             system += (
@@ -213,9 +383,21 @@ class BaseAgent:
             tool_schemas = [t.to_openai_schema() for t in tools]
         else:
             tool_schemas = None
-        return self.llm.chat(messages, tools=tool_schemas)  # type: ignore[union-attr]
+        if self.last_run_stats:
+            self.last_run_stats["llm_calls"] = int(self.last_run_stats.get("llm_calls", 0)) + 1
+        try:
+            return self.llm.chat(  # type: ignore[union-attr]
+                messages, tools=tool_schemas, max_tokens=self.max_output_tokens
+            )
+        except TypeError:
+            # Compatibility with lightweight test doubles and custom backends.
+            return self.llm.chat(messages, tools=tool_schemas)  # type: ignore[union-attr]
 
-    def _handle_tool_call(self, tool_call: dict[str, Any]) -> dict[str, Any]:
+    def _handle_tool_call(
+        self,
+        tool_call: dict[str, Any],
+        tool_call_counts: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """执行工具调用，返回 assistant 消息格式。"""
         func_name = tool_call.get("function", {}).get("name", "unknown")
         func_args_str = tool_call.get("function", {}).get("arguments", "{}")
@@ -225,6 +407,26 @@ class BaseAgent:
             func_args = json.loads(func_args_str) if isinstance(func_args_str, str) else func_args_str
         except json.JSONDecodeError:
             func_args = {}
+
+        counts = tool_call_counts if tool_call_counts is not None else {}
+        limit = self.tool_budget.get(func_name)
+        if limit is not None and counts.get(func_name, 0) >= limit:
+            result = f"工具预算已耗尽: {func_name} 最多允许 {limit} 次调用"
+            self.last_run_stats["stopped_reason"] = "tool_budget_exhausted"
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id", ""),
+                "content": result,
+            }
+        if not self._path_allowed(func_name, func_args):
+            result = f"路径越界: {func_args.get('path', '.')} 不在本阶段 allowed_paths 内"
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id", ""),
+                "content": result,
+            }
+        counts[func_name] = counts.get(func_name, 0) + 1
+        self.last_run_stats["tool_calls"] = dict(counts)
 
         # 查找并执行工具
         tool = next((t for t in self.tools if t.name == func_name), None)
@@ -244,22 +446,187 @@ class BaseAgent:
             "content": result,
         }
 
-    def _parse_final_output(self, content: str) -> dict[str, Any]:
-        """解析 Agent 的最终文本输出为结构化 dict。"""
+    def _path_allowed(self, tool_name: str, arguments: dict[str, Any]) -> bool:
+        if not self.allowed_paths or tool_name not in {"read_file", "search_code", "list_dir"}:
+            return True
+        requested = str(arguments.get("path", ".") or ".").replace("\\", "/").lstrip("./")
+        if requested in {"", "."}:
+            return False
+        allowed = [item.replace("\\", "/").lstrip("./") for item in self.allowed_paths if item]
+        if tool_name == "read_file":
+            return any(requested == item or requested.endswith("/" + item) for item in allowed)
+        return any(
+            item == requested or item.startswith(requested.rstrip("/") + "/")
+            for item in allowed
+        )
+
+    @staticmethod
+    def _validate_against_schema(
+        result: dict[str, Any], output_schema: dict[str, Any] | None
+    ) -> list[str]:
+        """Validate parsed result against output_schema required fields.
+
+        Returns a list of missing/invalid field paths (empty = valid).
+        Checks top-level required fields and one level of nesting.
+        """
+        if not output_schema or not isinstance(result, dict):
+            return []
+        required = output_schema.get("required", [])
+        if not isinstance(required, list):
+            return []
+        properties = output_schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+
+        missing: list[str] = []
+        for field in required:
+            if field not in result or result[field] is None:
+                missing.append(field)
+                continue
+            # Check nested required fields for object-type properties
+            field_schema = properties.get(field, {})
+            if isinstance(field_schema, dict):
+                nested_required = field_schema.get("required", [])
+                if isinstance(nested_required, list):
+                    nested_value = result[field]
+                    if isinstance(nested_value, dict):
+                        for nested_field in nested_required:
+                            if nested_field not in nested_value or nested_value[nested_field] is None:
+                                missing.append(f"{field}.{nested_field}")
+        return missing
+
+    def _try_resubmit_final_result(
+        self,
+        broken_args: str,
+        messages: list[dict[str, Any]],
+        active_tools: list[Tool],
+        missing_fields: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Give the LLM one chance to fix malformed/incomplete JSON in submit_final_result.
+
+        Returns a parsed dict on success, or None if the LLM could not produce
+        valid JSON after one correction attempt.
+        """
+        if not self.llm or self.max_fallback_calls < 1:
+            return None
+
+        missing_hint = ""
+        if missing_fields:
+            missing_hint = (
+                "\n\n**关键问题**：你的输出缺少以下必需字段，请补充完整：\n"
+                + "\n".join(f"  - `{f}`" for f in missing_fields)
+                + "\n请基于你的分析结论填充这些字段的合理值，不要编造没有证据支持的内容。"
+            )
+
+        correction_prompt = (
+            "你刚才调用了 submit_final_result 工具，但传入的 JSON 参数格式有误"
+            "（可能被截断、包含非法的 JSON 语法，或缺少必需字段）。\n\n"
+            "下面是你在工具调用中传入的原始内容：\n"
+            "```\n" + broken_args[:4000] + "\n```\n"
+            + missing_hint + "\n\n"
+            "请**更正 JSON 语法错误并补全缺失字段**后再次调用 submit_final_result 工具提交正确的 JSON。\n"
+            "保持原有的分析结论不变，只修复 JSON 格式和补充缺失字段。直接调用 submit_final_result。"
+        )
+
         try:
-            # 尝试解析 JSON（可能在 ```json 代码块中）
-            if "```json" in content:
-                start = content.index("```json") + 7
-                end = content.index("```", start)
-                return json.loads(content[start:end])
-            if "{" in content:
-                start = content.index("{")
-                end = content.rindex("}") + 1
-                return json.loads(content[start:end])
-        except (json.JSONDecodeError, ValueError):
+            messages.append({"role": "user", "content": correction_prompt})
+            response = self._call_llm(messages, active_tools)
+
+            resubmit_ok: dict[str, Any] | None = None
+            if response.tool_calls:
+                for tc in response.tool_calls:
+                    if tc.get("function", {}).get("name") == "submit_final_result":
+                        args_str = tc.get("function", {}).get("arguments", "{}")
+                        args_str = args_str if isinstance(args_str, str) else str(args_str)
+                        try:
+                            parsed = json.loads(args_str)
+                        except json.JSONDecodeError:
+                            from .json_repair import repair_json
+                            parsed = repair_json(args_str)
+                        if parsed is not None and isinstance(parsed, dict):
+                            # Validate against schema one more time
+                            schema_missing = self._validate_against_schema(parsed, self.output_schema)
+                            if not schema_missing:
+                                return parsed
+                            _safe_print(
+                                f"  [{self.name}] [WARN] resubmit 后仍缺少字段: {schema_missing}"
+                            )
+                            # Don't return None — fall through to text fallback below
+                            resubmit_ok = parsed  # preserve partial result
+
+            # Try text parsing (either no tool_calls, or tool_call validation failed)
+            if response.content:
+                parsed = self._parse_final_output(response.content)
+                if "_raw_output" not in parsed:
+                    schema_missing = self._validate_against_schema(parsed, self.output_schema)
+                    if not schema_missing:
+                        return parsed
+                # Return best-effort partial result if available
+                if resubmit_ok is not None:
+                    return resubmit_ok
+        except Exception:
             pass
 
-        # 无法解析为 JSON，返回原始文本
+        return None
+
+    def _parse_final_output(self, content: str) -> dict[str, Any]:
+        """解析 Agent 的最终文本输出为结构化 dict。
+
+        Uses the robust JSON repair module before falling back to raw text.
+        After each parse/repair tier, validates against output_schema required fields.
+        """
+        from .json_repair import repair_json, extract_largest_json_object
+
+        def _valid_or_missing(parsed: dict) -> dict | None:
+            """Return parsed if schema-valid, else return a dict with _missing fields so
+            callers higher up can decide to resubmit or fall back."""
+            missing = self._validate_against_schema(parsed, self.output_schema)
+            if not missing:
+                return parsed
+            _safe_print(
+                f"  [{self.name}] [WARN] _parse_final_output 修复后仍缺少字段: {missing}"
+            )
+            # Return with marker so BaseAgent.run can detect and handle
+            parsed["_schema_missing"] = list(missing)
+            return parsed
+
+        # Tier 1: parse ```json fenced block directly.
+        if "```json" in content:
+            start = content.index("```json") + 7
+            try:
+                end = content.index("```", start)
+            except ValueError:
+                end = len(content)  # unclosed fence — use rest of content
+            block = content[start:end].strip()
+            try:
+                parsed = json.loads(block)
+                valid = _valid_or_missing(parsed)
+                if valid is not None and "_schema_missing" not in valid:
+                    return valid
+                if valid is not None:
+                    return valid  # has _schema_missing marker, let caller decide
+            except json.JSONDecodeError:
+                repaired = repair_json(block)
+                if repaired is not None:
+                    valid = _valid_or_missing(repaired)
+                    if valid is not None:
+                        return valid
+
+        # Tier 2: extract the largest valid/reparable JSON object.
+        obj = extract_largest_json_object(content)
+        if obj is not None:
+            valid = _valid_or_missing(obj)
+            if valid is not None:
+                return valid
+
+        # Tier 3: attempt repair on the full text.
+        repaired = repair_json(content)
+        if repaired is not None:
+            valid = _valid_or_missing(repaired)
+            if valid is not None:
+                return valid
+
+        # Tier 4: ultimate fallback — return raw text.
         return {"_raw_output": content}
 
 
@@ -332,15 +699,21 @@ def _make_search_code(workspace: Path) -> Tool:
                  "-E", pattern, str(search_dir)],
                 capture_output=True, text=True, timeout=30, shell=False,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            # grep 不可用，用 Python 实现
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            # grep 不可用（例如 Windows 上 Git Bash 的 grep 缺失 DLL）
             return _python_search(search_dir, pattern)
 
-        output = result.stdout.strip()
+        # 防御性检查：某些 Windows 环境下 stdout 可能为 None
+        stdout = getattr(result, "stdout", None)
+        if stdout is None:
+            return _python_search(search_dir, pattern)
+
+        output = stdout.strip()
         if not output:
             return f"未找到匹配 '{pattern}' 的结果"
         lines = output.splitlines()[:50]
-        header = f"找到 {len(result.stdout.splitlines())} 处匹配 (显示前50):\n"
+        total_matches = len(stdout.splitlines())
+        header = f"找到 {total_matches} 处匹配 (显示前50):\n"
         return header + "\n".join(lines)
 
     return Tool(
@@ -520,10 +893,10 @@ def _make_submit_result_tool(output_schema: dict[str, Any]) -> Tool:
 def _safe_print(msg: str) -> None:
     """安全打印 — 处理 Windows GBK 编码无法输出 emoji 的问题。"""
     try:
-        print(msg)
+        print(msg, flush=True)
     except UnicodeEncodeError:
         # 移除无法编码的字符后重试
-        print(msg.encode("gbk", errors="replace").decode("gbk", errors="replace"))
+        print(msg.encode("gbk", errors="replace").decode("gbk", errors="replace"), flush=True)
 
 
 def _resolve_path(workspace: Path, path: str) -> Path:

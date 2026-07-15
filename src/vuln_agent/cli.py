@@ -33,7 +33,11 @@ from vuln_agent.runner import run_dict as runner_run_dict, run_file as runner_ru
 # ── 公共执行函数 ──────────────────────────────────────────────────────
 
 
-def run_preset_demo(key: str, output_dir: Path | None = None) -> int:
+def run_preset_demo(
+    key: str,
+    output_dir: Path | None = None,
+    run_mode: str = "balanced",
+) -> int:
     """运行预置 demo（兼容旧 API，内部委托给 runner）。"""
     preset = get_demo(key)
     if preset is None:
@@ -61,6 +65,7 @@ def run_preset_demo(key: str, output_dir: Path | None = None) -> int:
             test_framework=preset.repository.test_framework,
             source_files=sources,
             validation_results=val_results,
+            run_mode=run_mode,
         )
     except Exception as exc:
         print(f"[异常] {key}: {exc}")
@@ -74,6 +79,7 @@ def run_json_file(
     output_dir: Path | None = None,
     full_pipeline: bool = True,
     source_dir: str | None = None,
+    run_mode: str = "balanced",
 ) -> int:
     """从 JSON 文件运行 Agent 流水线。
 
@@ -98,6 +104,7 @@ def run_json_file(
             result = runner_run_file(
                 file_path, source_files=source_files,
                 source_dir=source_dir or str(path.parent),
+                run_mode=run_mode,
             )
             return _print_result(result, path.stem, output_dir)
         else:
@@ -448,6 +455,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--all", action="store_true", help="运行所有 demo")
     run_p.add_argument("--output-dir", "-o", default=None, help="输出目录")
     run_p.add_argument("--analyze-only", action="store_true", help="仅分析，不生成补丁")
+    run_p.add_argument(
+        "--run-mode", choices=["fast", "balanced", "deep"], default="balanced",
+        help="推理策略：fast / balanced（默认）/ deep",
+    )
 
     serve_p = sub.add_parser("serve", help="启动 API")
     serve_p.add_argument("--host", default="127.0.0.1")
@@ -490,14 +501,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.file_path, output_dir,
                 full_pipeline=not args.analyze_only,
                 source_dir=args.source_dir,
+                run_mode=args.run_mode,
             )
         if args.key:
             # 先尝试 demo key，再尝试文件路径
             if get_demo(args.key):
-                return run_preset_demo(args.key, output_dir)
+                return run_preset_demo(args.key, output_dir, args.run_mode)
             p = Path(args.key)
             if p.exists() and p.suffix == ".json":
-                return run_json_file(args.key, output_dir, full_pipeline=not args.analyze_only, source_dir=args.source_dir)
+                return run_json_file(
+                    args.key, output_dir, full_pipeline=not args.analyze_only,
+                    source_dir=args.source_dir, run_mode=args.run_mode,
+                )
             print(f"[错误] 未知 demo key 且文件不存在: {args.key}")
             print(f"可用 demo: {', '.join(d.key for d in DEMOS)}")
             return 1

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,13 @@ from .models import (
     NormalizedVulnerability,
 )
 from .tools import AssetInventoryTool, CodeContextTool, RuntimeEvidenceTool
+from .reasoning import (
+    PipelineMode,
+    ReasoningMode,
+    StageExecution,
+    normalize_pipeline_mode,
+    stage_policy,
+)
 
 if TYPE_CHECKING:
     from .llm import LLMBackend
@@ -66,19 +75,29 @@ class ImpactAnalysisAgent(BaseAgent):
         runtime_tool: RuntimeEvidenceTool,
         llm: LLMBackend | None = None,
         workspace: Path | None = None,
+        pipeline_mode: str | PipelineMode = PipelineMode.BALANCED,
     ):
         ws = workspace or Path.cwd()
+        self.pipeline_mode = normalize_pipeline_mode(pipeline_mode)
+        self.policy = stage_policy("impact", self.pipeline_mode)
         super().__init__(
             name="ImpactAnalysis",
             system_prompt=IMPACT_AGENT_PROMPT,
             tools=create_default_tools(ws),
             llm=llm,
-            max_turns=15,
+            max_turns=self.policy.max_turns,
             workspace=ws,
+            reasoning_mode=self.policy.deep_path.value,
+            tool_budget=dict(self.policy.tool_budget),
+            no_progress_limit=self.policy.no_progress_limit,
+            max_output_tokens=self.policy.max_output_tokens,
         )
         self.code_tool = code_tool
         self.asset_tool = asset_tool
         self.runtime_tool = runtime_tool
+        self.last_execution = StageExecution(
+            "impact", self.pipeline_mode.value, self.policy.fast_path.value
+        )
 
     def analyze(
         self,
@@ -90,12 +109,268 @@ class ImpactAnalysisAgent(BaseAgent):
         self.output_schema = IMPACT_SCHEMA
 
         task = self._build_task(finding, evidence_bundle)
-        raw = self.run(task)
+        raw = self._single_shot(task)
+        assessment = self._dict_to_assessment(finding, raw) if "_raw_output" not in raw else None
+        if assessment is not None:
+            assessment = self._ground_assessment(finding, evidence_bundle, assessment)
+        escalation_reasons = self._escalation_reasons(finding, evidence_bundle, assessment)
+        should_escalate = self.policy.allow_escalation and (
+            self.pipeline_mode == PipelineMode.DEEP or bool(escalation_reasons)
+        )
+        if not should_escalate:
+            if assessment is not None:
+                if escalation_reasons:
+                    assessment.needs_human_review = True
+                    assessment.unknowns.extend(
+                        f"fast_mode_not_escalated:{reason}" for reason in escalation_reasons
+                    )
+                    assessment.unknowns = list(dict.fromkeys(assessment.unknowns))
+                self.last_execution = StageExecution(
+                    "impact", self.pipeline_mode.value, ReasoningMode.DIRECT_STRUCTURED.value,
+                    llm_calls=1,
+                    escalation_reasons=escalation_reasons,
+                )
+                return assessment
+            return self._ground_assessment(
+                finding,
+                evidence_bundle,
+                self._dict_to_assessment(
+                    finding, self._extract_impact_from_raw(raw.get("_raw_output", ""), finding)
+                ),
+            )
+
+        # ── 续接模式：将 single-shot 结果作为 ReAct 的起点 ──
+        deep_context = {
+            "reasoning_mode": ReasoningMode.BOUNDED_REACT.value,
+            "tool_budget": self.policy.tool_budget,
+            "stop_conditions": [
+                "target located", "entry confirmed or explicitly unknown",
+                "path confirmed or evidence gap recorded", "two searches without new evidence",
+            ],
+        }
+        initial_messages = self._build_initial_messages(task, deep_context)
+        initial_messages.append({
+            "role": "assistant",
+            "content": (
+                "以下是我基于现有证据的初步影响面评估（未使用工具）：\n\n"
+                "```json\n" + json.dumps(raw, ensure_ascii=False, indent=2) + "\n```"
+            ),
+        })
+        initial_messages.append({
+            "role": "user",
+            "content": self._build_gap_instruction(
+                escalation_reasons,
+                "Evidence-driven Bounded ReAct：建立待确认问题列表，只搜索尚未被 EvidenceBundle 回答的问题。"
+                "每次工具调用后更新影响证据图。停止条件：目标文件已定位；API 入口已确认或明确未知；"
+                "至少一条入口到受影响点的路径已确认，或已明确证据不足；所有确认项都有 file:line/symbol。"
+                "连续两次搜索没有新证据必须停止。",
+            ),
+        })
+        raw = self.run(
+            task=task,
+            context=deep_context,
+            continuation_messages=initial_messages,
+        )
+        self.last_execution = StageExecution(
+            "impact", self.pipeline_mode.value, ReasoningMode.BOUNDED_REACT.value,
+            escalated=True,
+            escalation_reasons=escalation_reasons or ["explicit_deep_mode"],
+            llm_calls=int(self.last_run_stats.get("llm_calls", 0)) + 1,
+            tool_calls=dict(self.last_run_stats.get("tool_calls", {})),
+            stopped_reason=self.last_run_stats.get("stopped_reason"),
+        )
 
         if "_raw_output" in raw:
             extracted = self._extract_impact_from_raw(raw["_raw_output"], finding)
-            return self._dict_to_assessment(finding, extracted)
-        return self._dict_to_assessment(finding, raw)
+            result = self._dict_to_assessment(finding, extracted)
+        else:
+            result = self._dict_to_assessment(finding, raw)
+        return self._ground_assessment(finding, evidence_bundle, result)
+
+    @staticmethod
+    def _ground_assessment(
+        finding: NormalizedVulnerability,
+        bundle: EvidenceBundle | None,
+        assessment: ImpactAssessment,
+    ) -> ImpactAssessment:
+        """Remove production-impact claims that cannot be tied to collected evidence.
+
+        LLM output remains useful for synthesis, but it is not allowed to promote test
+        fixtures, CVE background knowledge, or framework conventions into confirmed
+        repository impact. Unsupported claims are retained as explicit unknowns so the
+        report stays informative without presenting guesses as facts.
+        """
+        if bundle is None:
+            assessment.confidence_score = min(assessment.confidence_score, 0.5)
+            assessment.needs_human_review = True
+            assessment.unknowns = list(dict.fromkeys([
+                *assessment.unknowns,
+                "impact_not_grounded: EvidenceBundle was not available",
+            ]))
+            return assessment
+
+        evidence_entries = {
+            (item.method.upper(), item.route): item for item in bundle.entry_points
+        }
+        evidence_routes = {item.route for item in bundle.entry_points}
+        source_text = "\n".join(item.content for item in bundle.code_slices).lower()
+        grounded_entries: list[ApiEntryPoint] = []
+        removed_claim = False
+        for entry in assessment.entry_points:
+            method = (entry.method or "ANY").upper()
+            supported = (
+                (method, entry.route) in evidence_entries
+                or ("ANY", entry.route) in evidence_entries
+                or entry.route in evidence_routes and method == "ANY"
+            )
+            if not supported and method in {"CALL", "API", "LIBRARY"}:
+                symbol_match = re.findall(r"[A-Za-z_$][\w$]*", entry.route)
+                symbol = symbol_match[-1].lower() if symbol_match else ""
+                supported = bool(
+                    symbol
+                    and re.search(
+                        rf"\b(?:def|class|function|func|fn)\s+{re.escape(symbol)}\b",
+                        source_text,
+                    )
+                )
+            if supported:
+                grounded_entries.append(entry)
+            else:
+                removed_claim = True
+                assessment.unknowns.append(
+                    f"unverified entry point removed from confirmed impact: {method} {entry.route}"
+                )
+        assessment.entry_points = grounded_entries
+
+        anchors: set[str] = set()
+        for item in bundle.target_files:
+            anchors.update({Path(item.path).name.lower(), Path(item.path).stem.lower()})
+        for item in [*bundle.source_candidates, *bundle.sink_candidates]:
+            if item.symbol and item.symbol != "<module>":
+                anchors.add(item.symbol.lower())
+            anchors.update({Path(item.path).name.lower(), Path(item.path).stem.lower()})
+        grounded_routes = {*evidence_routes, *[entry.route for entry in grounded_entries]}
+        anchors.update(route.lower() for route in grounded_routes if route)
+        anchors = {item for item in anchors if len(item) >= 3}
+
+        grounded_paths: list[list[str]] = []
+        for path in assessment.call_paths:
+            rendered = " ".join(str(step) for step in path).lower()
+            matched = {anchor for anchor in anchors if anchor in rendered}
+            if len(matched) >= 2:
+                grounded_paths.append(path)
+            else:
+                removed_claim = True
+                assessment.unknowns.append(
+                    "unverified call path removed from confirmed impact: " + " -> ".join(path)
+                )
+        assessment.call_paths = grounded_paths
+
+        known_services = {
+            value.strip().lower()
+            for value in (
+                bundle.repository_summary.repository,
+                finding.repository,
+            )
+            if value and value.strip()
+        }
+        if known_services:
+            grounded_services: list[str] = []
+            for service in assessment.affected_services:
+                normalized = service.strip().lower()
+                if any(normalized == known or normalized in known or known in normalized for known in known_services):
+                    grounded_services.append(service)
+                else:
+                    removed_claim = True
+                    assessment.unknowns.append(
+                        f"potential affected service not confirmed by repository evidence: {service}"
+                    )
+            assessment.affected_services = grounded_services
+
+        if not bundle.target_files and finding.dependency is None:
+            assessment.confidence_score = min(assessment.confidence_score, 0.45)
+            assessment.needs_human_review = True
+        if not assessment.call_paths:
+            assessment.confidence_score = min(assessment.confidence_score, 0.6)
+            if assessment.status == AssessmentStatus.CONFIRMED:
+                assessment.status = AssessmentStatus.PROBABLE
+            assessment.needs_human_review = True
+        elif removed_claim:
+            assessment.confidence_score = min(assessment.confidence_score, 0.75)
+            assessment.needs_human_review = True
+        assessment.unknowns = list(dict.fromkeys(assessment.unknowns))
+        return assessment
+
+    def _single_shot(self, task: str) -> dict:
+        from .llm import IMPACT_SCHEMA
+
+        try:
+            raw = self.llm.reason(  # type: ignore[union-attr]
+                user_prompt=task,
+                system_prompt=(
+                    "基于给定 Finding 和 EvidenceBundle 做一次结构化影响判断。"
+                    "不要调用工具，不要虚构入口或调用路径；证据不足写入 unknowns。"
+                ),
+                output_schema=IMPACT_SCHEMA,
+                temperature=0.1,
+                max_tokens=self.policy.max_output_tokens,
+            )
+            return ImpactAnalysisAgent._normalize_single_shot(raw)
+        except Exception as exc:
+            return {"_raw_output": f"single-shot impact failed: {exc}"}
+
+    @staticmethod
+    def _normalize_single_shot(raw: dict | str) -> dict:
+        """Handle _schema_missing: convert to _raw_output so analyze()
+        triggers fallback/escalation instead of accepting incomplete data."""
+        if isinstance(raw, dict) and raw.pop("_schema_missing", None):
+            partial = {k: v for k, v in raw.items() if not k.startswith("_")}
+            raw["_raw_output"] = json.dumps(partial, ensure_ascii=False, indent=2)
+            # Keep partial data for deep analysis context
+            raw["_partial_structured"] = partial
+            return raw
+        return raw if isinstance(raw, dict) else {"_raw_output": str(raw)}
+
+    @staticmethod
+    def _escalation_reasons(finding, bundle, assessment) -> list[str]:
+        reasons: list[str] = []
+        if assessment is None:
+            return ["single_shot_not_structured"]
+        if assessment.confidence_score < 0.4:
+            reasons.append("confidence_below_0.4")
+        if bundle and not bundle.target_files:
+            reasons.append("reported_target_not_collected")
+        if finding.severity.value in {"critical", "high"} and not assessment.call_paths:
+            reasons.append("high_severity_without_confirmed_call_path")
+        evidence_routes = {item.route for item in bundle.entry_points} if bundle else set()
+        assessed_routes = {item.route for item in assessment.entry_points}
+        if evidence_routes and assessed_routes and not assessed_routes.issubset(evidence_routes):
+            reasons.append("impact_entry_point_conflicts_with_evidence")
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _build_gap_instruction(escalation_reasons: list[str], deep_strategy: str) -> str:
+        """将 escalation 原因转为面向 LLM 的差距调查指令。"""
+        reason_labels: dict[str, str] = {
+            "confidence_below_0.4": "整体置信度不足（< 0.4），需要更多源码证据支持",
+            "reported_target_not_collected": "漏洞报告中的目标文件未在 EvidenceBundle 中收集到",
+            "high_severity_without_confirmed_call_path": "高危漏洞缺少确认的调用路径（call_paths 为空）",
+            "impact_entry_point_conflicts_with_evidence": "影响面入口点与 EvidenceBundle 中的证据不一致",
+            "single_shot_not_structured": "初步评估未产出结构化结果，需要从头分析",
+        }
+        gaps = [reason_labels.get(r, r) for r in escalation_reasons]
+
+        return (
+            "## 深度分析：基于初步评估继续调查\n\n"
+            "上述初步评估是在无工具访问的情况下做出的。以下缺口需要补充调查：\n\n"
+            + "\n".join(f"- {g}" for g in gaps) + "\n\n"
+            f"**深度策略**：{deep_strategy}\n\n"
+            "**指示**：\n"
+            "1. 保留初步评估中已有证据支持的结论（affected_services、entry_points 等如已确认则不变）\n"
+            "2. 只使用工具调查上述缺口；不要重新确认已有证据的字段\n"
+            "3. 连续两次搜索无新证据时必须停止\n"
+            "4. 收集足够证据后，修订初步评估并调用 submit_final_result 提交完整结果\n"
+        )
 
     def _extract_impact_from_raw(
         self,
@@ -148,8 +423,13 @@ class ImpactAnalysisAgent(BaseAgent):
 
     @staticmethod
     def _fallback_impact_extraction(raw_text: str, finding: NormalizedVulnerability) -> dict:
-        """LLM 不可用时的纯文本回退 — 从分析文本和漏洞报告中提取影响面信息。"""
+        """Last-resort extraction when both JSON repair and LLM re-extraction failed.
+
+        Attempts to find the largest valid/reparable JSON object first, then
+        falls back to constructing minimal sensible defaults from the finding data.
+        """
         import re
+        from .json_repair import extract_largest_json_object
 
         result: dict = {
             "status": "possible",
@@ -169,39 +449,18 @@ class ImpactAnalysisAgent(BaseAgent):
             "reasoning": "",
         }
 
-        # 1. Try to find JSON block
-        json_match = re.search(r'\{[^{}]*"affected_services"[^{}]*\}', raw_text, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'\{[^{}]*"entry_points"[^{}]*\}', raw_text, re.DOTALL)
-        if json_match:
-            import json as _json
-            try:
-                parsed = _json.loads(json_match.group(0))
-                if isinstance(parsed, dict):
-                    for k, v in parsed.items():
-                        if k in result and v:
-                            result[k] = v
-            except (_json.JSONDecodeError, ValueError):
-                pass
+        # Attempt to find and repair the largest JSON object in the text.
+        obj = extract_largest_json_object(raw_text)
+        if obj is not None and isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in result and v:
+                    result[k] = v
 
-        # 2. Extract affected services from text patterns
-        service_patterns = [
-            r'(?:受影响|影响)\s*(?:服务|组件|系统)[：:\s]*(.+?)(?:\n|$)',
-            r'(?:affected.service|impacted.service)[：:\s]*(.+?)(?:\n|$)',
-        ]
-        for pat in service_patterns:
-            match = re.search(pat, raw_text, re.IGNORECASE)
-            if match and not result.get("affected_services"):
-                services = [s.strip() for s in re.split(r'[,，、]', match.group(1)) if s.strip()]
-                result["affected_services"] = services[:10]
-                break
-
-        # 3. Build meaningful fallback from finding data
+        # Fill gaps with sensible defaults from the finding data.
         locs = [f"{loc.file}:{loc.line}" for loc in finding.locations if loc.line]
         evidence_text = "; ".join(e for e in (finding.evidence or []) if e.strip())
 
         if not result["affected_services"]:
-            # Infer from vulnerability context
             if finding.repository:
                 result["affected_services"] = [finding.repository]
             elif finding.dependency:

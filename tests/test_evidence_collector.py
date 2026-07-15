@@ -121,6 +121,66 @@ class EvidenceCollectorTests(unittest.TestCase):
         self.assertLessEqual(len(prompt), 2_100)
         self.assertIn("bundle_hash", prompt)
 
+    def test_descriptive_location_resolves_every_real_candidate(self):
+        item = finding(
+            vulnerability_type="JWT algorithm confusion",
+            affected_file="authlib/jose/rfc7519/claims.py or jwt.py — decode path",
+            affected_function=None,
+            line=None,
+        )
+        sources = [
+            SourceFile("authlib/jose/rfc7519/claims.py", "class JWTClaims(dict):\n    pass\n"),
+            SourceFile("authlib/jose/rfc7519/jwt.py", "class JsonWebToken:\n    def decode(self, s, key):\n        pass\n"),
+        ]
+
+        bundle = EvidenceCollector().collect(item, sources)
+
+        self.assertEqual(
+            [target.path for target in bundle.target_files],
+            [
+                "authlib/jose/rfc7519/claims.py",
+                "authlib/jose/rfc7519/jwt.py",
+            ],
+        )
+        self.assertEqual(
+            {code_slice.path for code_slice in bundle.code_slices},
+            {
+                "authlib/jose/rfc7519/claims.py",
+                "authlib/jose/rfc7519/jwt.py",
+            },
+        )
+
+    def test_tests_examples_and_ci_files_do_not_become_production_impact(self):
+        sources = [
+            SourceFile(
+                "src/api/users.py",
+                "@app.get('/users')\ndef find_user():\n    return db.execute(request.args['q'])\n",
+            ),
+            SourceFile(
+                "tests/test_fake_routes.py",
+                "@app.post('/fixture/admin')\ndef fake():\n    return execute(request.args['q'])\n",
+            ),
+            SourceFile(
+                "examples/demo.py",
+                "@app.delete('/demo')\ndef demo():\n    return execute(input())\n",
+            ),
+            SourceFile(
+                ".github/workflows/security.yml",
+                "steps:\n  - run: curl https://example.invalid?q=user_input\n",
+            ),
+        ]
+
+        bundle = EvidenceCollector().collect(finding(line=2), sources)
+
+        self.assertEqual(
+            [(entry.route, entry.path) for entry in bundle.entry_points],
+            [("/users", "src/api/users.py")],
+        )
+        production_candidate_paths = {
+            item.path for item in [*bundle.source_candidates, *bundle.sink_candidates]
+        }
+        self.assertEqual(production_candidate_paths, {"src/api/users.py"})
+
 
 if __name__ == "__main__":
     unittest.main()

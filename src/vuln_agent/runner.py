@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +49,20 @@ from .validation import ValidationToolchain, passed_tool, skipped_tool
 from .execution import WorkspaceValidationExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# 临时目录列表（模块卸载时清理）
+_cleanup_dirs: list[str] = []
+
+
+def _cleanup_temp_dirs() -> None:
+    """清理所有临时工作目录。"""
+    for d in _cleanup_dirs:
+        if d and Path(d).exists():
+            shutil.rmtree(d, ignore_errors=True)
+    _cleanup_dirs.clear()
+
+
+atexit.register(_cleanup_temp_dirs)
 
 
 # ── 公共 API ─────────────────────────────────────────────────────────
@@ -97,15 +114,32 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
 
     # ── 工作目录 ──
     source_dir = overrides.get("source_dir")
-    workspace = Path(source_dir).resolve() if source_dir else Path.cwd()
-
-    # ── 加载源文件 ──
     source_files_data = overrides.get("source_files")
-    if source_files_data is None and source_dir:
-        source_files_data = _load_source_dir(source_dir)
+
+    # 当提供了 source_files 但没有 source_dir 时，写入临时目录使 Agent 工具可访问
+    _temp_workspace: str | None = None
+    if source_files_data is not None and not source_dir:
+        _temp_workspace = tempfile.mkdtemp(prefix="vuln_agent_")
+        _cleanup_dirs.append(_temp_workspace)
+
+        normalized_virtual = _normalize_source_files_dict(source_files_data) or {}
+        for vf_path, vf_content in normalized_virtual.items():
+            full_path = Path(_temp_workspace) / vf_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(vf_content, encoding="utf-8")
+        workspace = Path(_temp_workspace).resolve()
+    elif source_dir:
+        workspace = Path(source_dir).resolve()
+        if source_files_data is None:
+            source_files_data = _load_source_dir(source_dir)
+    else:
+        workspace = Path.cwd()
 
     # ── 推断漏洞类型 ──
     is_dependency = _is_dependency_type(raw, finding)
+    run_mode = str(overrides.get("run_mode", raw.get("run_mode", "balanced"))).lower()
+    if run_mode not in {"fast", "balanced", "deep"}:
+        run_mode = "balanced"
 
     # ── 构建上下文 ──
     eng = _build_engineering(finding, raw, is_dependency, overrides)
@@ -119,13 +153,15 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     asset_ctx = _build_asset_context(finding, raw, overrides)
     runtime_ctx = _build_runtime_context(finding, raw, overrides)
 
-    impact = ImpactAnalysisAgent(
+    impact_agent = ImpactAnalysisAgent(
         StaticCodeContextTool({finding.finding_id: code_ctx}),
         StaticAssetInventoryTool({finding.finding_id: asset_ctx}),
         StaticRuntimeEvidenceTool({finding.finding_id: runtime_ctx}),
         llm=llm,
         workspace=workspace,
-    ).analyze(finding, evidence_bundle)
+        pipeline_mode=run_mode,
+    )
+    impact = impact_agent.analyze(finding, evidence_bundle)
 
     if is_dependency:
         root_cause_ctx = _build_dependency_root_cause(finding, raw, overrides)
@@ -141,23 +177,34 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         ),
         llm=llm,
         workspace=workspace,
+        pipeline_mode=run_mode,
     )
     root_cause_result = rc_agent.analyze(finding, impact, evidence_bundle)
 
     # ── 修复循环 ──
-    max_attempts = overrides.get("max_attempts", 2)
+    max_attempts = overrides.get("max_attempts", 1 if run_mode == "fast" else 2)
     validation_commands = overrides.get("validation_commands", raw.get("validation_commands", {}))
     validation_executor = WorkspaceValidationExecutor(
         workspace=workspace,
         commands=validation_commands,
         timeout_seconds=int(overrides.get("validation_timeout", raw.get("validation_timeout", 300))),
+        source_files=_normalize_source_files_dict(source_files_data),
     )
     loop = PatchRepairLoopOrchestrator(
-        remediation_agent=RemediationPlanAgent(llm=llm, workspace=workspace),
-        patch_generation_agent=PatchGenerationAgent(PatchGenerationPolicy(), llm=llm, workspace=workspace),
+        remediation_agent=RemediationPlanAgent(
+            llm=llm, workspace=workspace, prefer_static=run_mode == "fast",
+            pipeline_mode=run_mode,
+        ),
+        patch_generation_agent=PatchGenerationAgent(
+            PatchGenerationPolicy(), llm=llm, workspace=workspace,
+            pipeline_mode=run_mode,
+        ),
         validation_toolchain=ValidationToolchain(executor=validation_executor),
-        failure_analysis_agent=FailureAnalysisAgent(llm=llm, workspace=workspace),
+        failure_analysis_agent=FailureAnalysisAgent(
+            llm=llm, workspace=workspace, pipeline_mode=run_mode,
+        ),
         report_agent=RemediationReportAgent(),
+        root_cause_agent=rc_agent,
         max_attempts=max_attempts,
     )
 
@@ -173,6 +220,14 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         "root_cause": root_cause_result.to_dict(),
         "evidence_bundle": evidence_bundle.to_dict(),
         "status": result.status.value,
+        "run_mode": run_mode,
+        "reasoning_trace": {
+            "impact": impact_agent.last_execution.to_dict(),
+            "root_cause": rc_agent.last_execution.to_dict(),
+            "remediation": loop.remediation_agent.last_execution.to_dict(),
+            "patch": loop.patch_generation_agent.last_execution.to_dict(),
+            "failure": loop.failure_analysis_agent.last_execution.to_dict(),
+        },
     }
 
     if result.final_report is not None:
@@ -202,6 +257,25 @@ def _is_dependency_type(raw: dict[str, Any], finding) -> bool:
         raw.get("vulnerability_type", "").lower() in ("dependency", "vulnerable and outdated component"),
     ]
     return any(dep_indicators)
+
+
+def _normalize_source_files_dict(source_files_data: dict[str, str] | list | None) -> dict[str, str] | None:
+    """Convert various source_files representations to a plain dict[str, str] or None."""
+    if source_files_data is None:
+        return None
+    if isinstance(source_files_data, dict):
+        return {str(k): str(v) for k, v in source_files_data.items()}
+    if isinstance(source_files_data, list):
+        result: dict[str, str] = {}
+        for item in source_files_data:
+            if isinstance(item, SourceFile):
+                result[item.path] = item.content or ""
+            elif isinstance(item, dict):
+                result[str(item.get("path", item.get("file", "")))] = str(item.get("content", ""))
+            else:
+                result[str(item)] = ""
+        return result
+    return None
 
 
 # ── 内部：源码加载 ───────────────────────────────────────────────────

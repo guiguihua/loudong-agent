@@ -24,6 +24,33 @@ load_env_file()
 # ── JSON Schema 构建辅助 ──────────────────────────────────────────────
 
 
+def _validate_schema_required(result: dict[str, Any], schema: dict[str, Any] | None) -> list[str]:
+    """Check that result has all fields required by schema. Returns list of missing paths."""
+    if not schema or not isinstance(result, dict):
+        return []
+    required = schema.get("required", [])
+    if not isinstance(required, list):
+        return []
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        properties = {}
+    missing: list[str] = []
+    for field in required:
+        if field not in result or result[field] is None:
+            missing.append(field)
+            continue
+        field_schema = properties.get(field, {})
+        if isinstance(field_schema, dict):
+            nested_required = field_schema.get("required", [])
+            if isinstance(nested_required, list):
+                nested_value = result[field]
+                if isinstance(nested_value, dict):
+                    for nf in nested_required:
+                        if nf not in nested_value or nested_value[nf] is None:
+                            missing.append(f"{field}.{nf}")
+    return missing
+
+
 def _model_schema(model_class: type, description: str, required_fields: list[str] | None = None) -> dict[str, Any]:
     """从 dataclass 的 type hints 推断 JSON Schema。"""
     return {"type": "object", "description": description, "properties": {}, "required": required_fields or []}
@@ -240,6 +267,19 @@ ROOT_CAUSE_SCHEMA = {
         },
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string", "description": "推理过程"},
+        "hypotheses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hypothesis": {"type": "string"},
+                    "required_evidence": {"type": "array", "items": {"type": "string"}},
+                    "support": {"type": "array", "items": {"type": "string"}},
+                    "counter_evidence": {"type": "array", "items": {"type": "string"}},
+                    "verdict": {"type": "string", "enum": ["confirmed", "rejected", "unknown"]},
+                },
+            },
+        },
     },
     "required": ["status", "root_cause_category", "summary", "missing_control", "causal_chain", "confidence_score", "needs_human_review"],
 }
@@ -293,7 +333,7 @@ FAILURE_ANALYSIS_SCHEMA = {
     "properties": {
         "primary_category": {
             "type": "string",
-            "enum": ["build_failure", "business_regression", "security_not_fixed", "scanner_still_reports", "differential_risk", "patch_policy_violation", "tooling_gap", "unknown"],
+            "enum": ["build_failure", "test_harness_failure", "business_regression", "security_not_fixed", "scanner_still_reports", "differential_risk", "patch_policy_violation", "tooling_gap", "unknown"],
         },
         "summary": {"type": "string", "description": "失败原因一句话摘要"},
         "findings": {
@@ -314,6 +354,13 @@ FAILURE_ANALYSIS_SCHEMA = {
         "remediation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给修复方案 Agent 的反馈"},
         "patch_generation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给补丁生成 Agent 的反馈"},
         "validation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给验证工具链的反馈"},
+        "route_to": {
+            "type": "string",
+            "enum": ["remediation_plan_agent", "root_cause_agent", "patch_generation_agent", "validation_toolchain", "human_review"],
+        },
+        "diagnostic_hypotheses": {"type": "array", "items": {"type": "string"}},
+        "reflection": {"type": "array", "items": {"type": "string"}},
+        "do_not_repeat": {"type": "array", "items": {"type": "string"}},
         "requires_root_cause_recheck": {"type": "boolean", "description": "是否需要重新检查根因"},
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string"},
@@ -379,6 +426,22 @@ REMEDIATION_PLAN_SCHEMA = {
         "confidence_score": {"type": "number", "minimum": 0, "maximum": 1},
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string"},
+        "candidate_rankings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "strategy": {"type": "string"},
+                    "causal_chain": {"type": "number"},
+                    "security_invariant": {"type": "number"},
+                    "compatibility": {"type": "number"},
+                    "verifiability": {"type": "number"},
+                    "change_risk": {"type": "number"},
+                    "weighted_score": {"type": "number"},
+                    "selected": {"type": "boolean"},
+                },
+            },
+        },
     },
     "required": ["status", "remediation_goal", "strategies", "planned_changes", "required_tests", "risk_points", "needs_human_review"],
 }
@@ -441,6 +504,7 @@ class LLMBackend:
         system_prompt: str = "",
         output_schema: dict[str, Any] | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> dict[str, Any] | str:
         """调用 DeepSeek 进行推理。
 
@@ -477,13 +541,13 @@ class LLMBackend:
         messages.append({"role": "user", "content": user_prompt})
 
         if output_schema:
-            return self._structured_call(client, messages, output_schema, temperature)
+            return self._structured_call(client, messages, output_schema, temperature, max_tokens)
 
         # 非结构化调用
         response = client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
         )
         content = response.choices[0].message.content
@@ -497,6 +561,7 @@ class LLMBackend:
         *,
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> "ChatResponse":
         """多轮对话接口 — 支持工具调用的 Agent 推理循环。
 
@@ -526,7 +591,7 @@ class LLMBackend:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "temperature": temperature,
         }
         if tools:
@@ -563,6 +628,7 @@ class LLMBackend:
         messages: list[dict[str, str]],
         schema: dict[str, Any],
         temperature: float,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """使用 OpenAI function calling 实现结构化输出。
 
@@ -589,7 +655,7 @@ class LLMBackend:
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens or self.max_tokens,
                 temperature=temperature,
                 tools=[{"type": "function", "function": function_def}],
             )
@@ -603,21 +669,40 @@ class LLMBackend:
         if msg.tool_calls:
             tool_args_raw = msg.tool_calls[0].function.arguments
             try:
-                return json.loads(tool_args_raw)
+                parsed = json.loads(tool_args_raw)
             except (json.JSONDecodeError, AttributeError):
-                # JSON 可能被截断 — 尝试修复（补全末尾的 }]})
-                fixed = self._try_fix_truncated_json(tool_args_raw)
-                if fixed is not None:
+                parsed = None
+
+            if parsed is None:
+                # JSON 可能被截断 — 使用 robust repair 模块
+                from .json_repair import repair_json
+                parsed = repair_json(tool_args_raw)
+                if parsed is not None:
                     print(f"[LLM] JSON 被截断，已自动修复")
-                    return fixed
-                # 无法修复 → 返回 raw string 触发 fallback
-                return tool_args_raw
+
+            if isinstance(parsed, dict):
+                # ── 校验 output_schema 必需字段 ──
+                missing = _validate_schema_required(parsed, schema)
+                if missing:
+                    print(f"[LLM] JSON 缺少必需字段: {missing}，仍返回但标记 _schema_missing")
+                    parsed["_schema_missing"] = list(missing)
+                return parsed
+
+            # 无法修复 → 返回 raw string 触发 fallback
+            return tool_args_raw
 
         # Fallback: 从文本内容中解析 JSON
         if msg.content:
             text = msg.content
             try:
                 parsed = self._extract_json_from_text(text)
+                if isinstance(parsed, dict):
+                    # ── 校验 output_schema 必需字段 ──
+                    missing = _validate_schema_required(parsed, schema)
+                    if missing:
+                        print(f"[LLM] 文本提取 JSON 缺少必需字段: {missing}")
+                        parsed["_schema_missing"] = list(missing)
+                    return parsed
                 if parsed is not None:
                     return parsed
             except (json.JSONDecodeError, ValueError):
@@ -640,53 +725,36 @@ class LLMBackend:
 
     @staticmethod
     def _extract_json_from_text(text: str) -> dict[str, Any] | None:
-        """从文本中提取 JSON 对象。"""
+        """从文本中提取 JSON 对象，尝试 repair 回退。"""
+        from .json_repair import repair_json
+
         if "```json" in text:
             start = text.index("```json") + 7
             end = text.index("```", start)
-            return json.loads(text[start:end])
-        elif "{" in text:
+            block = text[start:end]
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                repaired = repair_json(block)
+                if repaired is not None:
+                    return repaired
+        if "{" in text:
             start = text.index("{")
             end = text.rindex("}") + 1
-            return json.loads(text[start:end])
+            block = text[start:end]
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                repaired = repair_json(block)
+                if repaired is not None:
+                    return repaired
         return None
 
     @staticmethod
     def _try_fix_truncated_json(raw: str) -> dict[str, Any] | None:
-        """尝试修复被截断的 JSON — 补全缺失的括号和引号。"""
-        if not raw or not raw.startswith("{"):
-            return None
-        # 统计未配对的括号
-        depth = 0
-        in_string = False
-        escaped = False
-        for ch in raw:
-            if escaped:
-                escaped = False
-                continue
-            if ch == "\\":
-                escaped = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-            elif not in_string:
-                if ch in "{[":
-                    depth += 1
-                elif ch in "}]":
-                    depth -= 1
-        if depth <= 0:
-            return None
-        # 如果在字符串内，先闭合字符串
-        fixed = raw
-        if in_string:
-            fixed += '"'
-        # 补全缺失的括号
-        # 简单策略：补齐 }]})
-        fixed += "}]}"[:depth] if depth <= 3 else "}" * depth
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            return None
+        """[DEPRECATED] 委托给 json_repair.repair_json。"""
+        from .json_repair import repair_json
+        return repair_json(raw)
 
 
 # ── 便捷函数 ──────────────────────────────────────────────────────────

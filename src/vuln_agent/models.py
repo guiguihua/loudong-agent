@@ -105,6 +105,7 @@ class ToolExecutionStatus(StrEnum):
 
 class FailureCategory(StrEnum):
     BUILD_FAILURE = "build_failure"
+    TEST_HARNESS_FAILURE = "test_harness_failure"
     BUSINESS_REGRESSION = "business_regression"
     SECURITY_NOT_FIXED = "security_not_fixed"
     SCANNER_STILL_REPORTS = "scanner_still_reports"
@@ -125,6 +126,7 @@ class RemediationFeedbackTarget(StrEnum):
     REMEDIATION_PLAN_AGENT = "remediation_plan_agent"
     ROOT_CAUSE_AGENT = "root_cause_agent"
     PATCH_GENERATION_AGENT = "patch_generation_agent"
+    VALIDATION_TOOLCHAIN = "validation_toolchain"
     HUMAN_REVIEW = "human_review"
 
 
@@ -545,6 +547,10 @@ class PreviousPatchAttempt:
     patch_id: str
     validation_status: PatchValidationStatus
     failures: list[VerificationFailure] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
+    prohibited_repeats: list[str] = field(default_factory=list)
+    route_to: RemediationFeedbackTarget | None = None
+    artifacts: list["PatchArtifact"] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -683,6 +689,9 @@ class FailureAnalysisResult:
     validation_feedback: list[str]
     requires_root_cause_recheck: bool
     needs_human_review: bool
+    diagnostic_hypotheses: list[str] = field(default_factory=list)
+    reflection: list[str] = field(default_factory=list)
+    do_not_repeat: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

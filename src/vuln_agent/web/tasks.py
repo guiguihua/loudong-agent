@@ -15,6 +15,16 @@ HISTORY_FILE = DATA_DIR / "task_history.json"
 
 
 @dataclass
+class StageEvent:
+    """单个阶段内的事件记录。"""
+    timestamp: float = field(default_factory=time.time)
+    stage: int = 0
+    event_type: str = ""  # started | progress | llm_call | tool_call | completed | error
+    message: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TaskInfo:
     task_id: str
     status: str = "pending"  # pending | running | succeeded | failed
@@ -26,6 +36,47 @@ class TaskInfo:
     severity: str | None = None
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    # ── 可观测性增强 ──
+    events: list[StageEvent] = field(default_factory=list)
+    attempt: int = 0
+    current_target: str | None = None
+    stage_started_at: dict[int, float] = field(default_factory=dict)
+    total_llm_calls: int = 0
+    total_tokens: int = 0
+
+    def add_event(
+        self, event_type: str, message: str, stage: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """添加事件记录并更新进度。"""
+        evt = StageEvent(
+            timestamp=time.time(),
+            stage=stage if stage is not None else self.stage,
+            event_type=event_type,
+            message=message,
+            details=details or {},
+        )
+        self.events.append(evt)
+        self.progress = message
+        # 跟踪 LLM 调用和 token
+        if event_type == "llm_call":
+            self.total_llm_calls += 1
+            self.total_tokens += (details or {}).get("tokens", 0)
+
+    def start_stage(self, stage: int, message: str, attempt: int = 0) -> None:
+        """标记阶段开始。"""
+        self.stage = stage
+        self.attempt = attempt
+        self.stage_started_at[stage] = time.time()
+        self.add_event("started", message, stage=stage, details={"attempt": attempt})
+
+    def complete_stage(self, stage: int, message: str) -> None:
+        """标记阶段完成。"""
+        elapsed = 0.0
+        if stage in self.stage_started_at:
+            elapsed = time.time() - self.stage_started_at[stage]
+        self.add_event("completed", message, stage=stage,
+                      details={"elapsed_sec": round(elapsed, 2)})
 
     @property
     def created_at_str(self) -> str:
@@ -44,6 +95,20 @@ class TaskInfo:
             "created_at": self.created_at,
             "created_at_str": self.created_at_str,
             "finished_at": self.finished_at,
+            "attempt": self.attempt,
+            "current_target": self.current_target,
+            "total_llm_calls": self.total_llm_calls,
+            "total_tokens": self.total_tokens,
+            "events": [
+                {
+                    "timestamp": e.timestamp,
+                    "stage": e.stage,
+                    "type": e.event_type,
+                    "message": e.message,
+                    "details": e.details,
+                }
+                for e in self.events[-50:]  # 最近 50 条
+            ],
         }
 
 

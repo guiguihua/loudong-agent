@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import re
+import tokenize
 from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import PurePosixPath
@@ -45,6 +47,14 @@ _CONFIG_NAMES = {
     "semgrep.yaml", "dockerfile", "docker-compose.yml", "docker-compose.yaml",
 }
 _TEST_PARTS = {"test", "tests", "spec", "specs", "__tests__"}
+_ANALYSIS_EXCLUDED_PARTS = {
+    ".git", ".github", "docs", "doc", "examples", "example", "fixtures",
+    "node_modules", "vendor", "dist", "build", "__pycache__",
+}
+_ANALYSIS_CODE_EXTENSIONS = set(_LANGUAGES) | {
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".html", ".htm", ".vue",
+    ".svelte", ".sql", ".sh", ".bash", ".ps1", ".swift", ".m", ".mm",
+}
 
 _ROUTE_PATTERNS = (
     ("FastAPI/Flask", re.compile(r"@(?:\w+\.)?(get|post|put|patch|delete|route)\(\s*['\"]([^'\"]+)"), 1, 2),
@@ -68,7 +78,7 @@ _SINK_FAMILIES = {
 _GENERIC_SINKS = (r"\b(?:eval|exec|open|execute|decode|load|loads|render)\s*\(",)
 _SOURCE_PATTERNS = (
     re.compile(r"\b(?:request\.(?:args|form|json|values|headers|cookies|query_params|path_params|body)|req\.(?:query|body|params|headers)|input\s*\(|getenv\s*\(|environ\[)"),
-    re.compile(r"\b(?:authorization|bearer|jwt|token|username|password|url|path|query|payload|algorithm|alg)\b", re.IGNORECASE),
+    re.compile(r"\b(?:authorization|bearer|jwt|token|username|password|url|path|query|payload|header|algorithm|alg)\b", re.IGNORECASE),
 )
 _SECRET_LINE = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|credential|private[_-]?key)(\s*[:=]\s*)(['\"]?)[^\s,'\"}]+"
@@ -124,26 +134,24 @@ class EvidenceCollector:
         scan_files = self._prioritize_files(files, {item.path for item in target_files})
 
         for location in finding.locations:
-            path = self._match_path(location.file, file_map)
-            if not path:
-                continue
-            lines = file_map[path].splitlines()
-            center = location.line or self._find_symbol_line(lines, location.function) or 1
-            self._add_slice(
-                slices, slice_keys, char_budget, path, lines, center,
-                self.context_lines,
-                f"finding target: {location.function or location.file}",
-            )
+            for path in self._match_paths(location.file, file_map):
+                lines = file_map[path].splitlines()
+                center = location.line or self._find_symbol_line(lines, location.function) or 1
+                self._add_slice(
+                    slices, slice_keys, char_budget, path, lines, center,
+                    self.context_lines,
+                    f"finding target: {location.function or location.file}",
+                )
 
         entry_points = self._collect_entry_points(scan_files, slices, slice_keys, char_budget)
         source_candidates = self._collect_candidates(
             scan_files, _SOURCE_PATTERNS, "source", "possible untrusted-input source",
-            slices, slice_keys, char_budget,
+            finding, {item.path for item in target_files}, slices, slice_keys, char_budget,
         )
         sink_patterns = tuple(re.compile(pattern, re.IGNORECASE) for pattern in self._sink_patterns(finding))
         sink_candidates = self._collect_candidates(
             scan_files, sink_patterns, "sink", f"{finding.vulnerability_type} sink pattern",
-            slices, slice_keys, char_budget,
+            finding, {item.path for item in target_files}, slices, slice_keys, char_budget,
         )
 
         dependency_evidence = self._collect_dependency_evidence(finding, files)
@@ -220,7 +228,7 @@ class EvidenceCollector:
             "files": [(item.path, hashlib.sha256(item.content.encode("utf-8")).hexdigest()) for item in files],
             "repository": asdict(repository),
             "engineering": asdict(engineering),
-            "schema": 1,
+            "schema": 2,
             "collector": {
                 "context_lines": self.context_lines,
                 "candidate_context_lines": self.candidate_context_lines,
@@ -238,36 +246,58 @@ class EvidenceCollector:
         result: list[FileEvidence] = []
         seen: set[str] = set()
         for location in finding.locations:
-            path = self._match_path(location.file, file_map)
-            if not path:
+            paths = self._match_paths(location.file, file_map)
+            if not paths:
                 warnings.append(f"reported target file was not supplied: {location.file}")
                 continue
-            if path in seen:
-                continue
-            seen.add(path)
-            content = file_map[path]
-            result.append(FileEvidence(
-                path=path,
-                matched_by="exact_path" if path == self._clean_path(location.file) else "suffix_path",
-                line_count=len(content.splitlines()),
-                sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-                language=self._language(path),
-            ))
+            for path in paths:
+                if path in seen:
+                    continue
+                seen.add(path)
+                content = file_map[path]
+                # 确定匹配方式：exact → suffix → candidate（多候选字符串中提取）
+                clean = self._clean_path(location.file)
+                if path == clean:
+                    matched_by = "exact_path"
+                elif path.endswith("/" + clean) or clean.endswith("/" + path):
+                    matched_by = "suffix_path"
+                else:
+                    matched_by = "candidate_path"
+                result.append(FileEvidence(
+                    path=path,
+                    matched_by=matched_by,
+                    line_count=len(content.splitlines()),
+                    sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    language=self._language(path),
+                ))
         return result
 
     def _collect_entry_points(self, files, slices, slice_keys, char_budget):
         result: list[EntryPointEvidence] = []
+        seen: set[tuple[str, str, str, int]] = set()
         for item in files:
-            if self._is_sensitive_env(item.path):
+            if (
+                self._is_sensitive_env(item.path)
+                or self._is_non_code(item.path)
+                or self._is_test_path(item.path)
+                or self._is_analysis_excluded(item.path)
+            ):
                 continue
             lines = item.content.splitlines()
+            ignored_lines = self._non_executable_lines(item.path, item.content)
             for line_no, line in enumerate(lines, 1):
+                if line_no in ignored_lines or self._looks_like_comment(line):
+                    continue
                 for framework, pattern, method_group, route_group in _ROUTE_PATTERNS:
                     match = pattern.search(line)
                     if not match:
                         continue
                     method = match.group(method_group).upper() if method_group else "ANY"
                     route = match.group(route_group)
+                    identity = (method, route, item.path, line_no)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
                     snippet_id = self._add_slice(
                         slices, slice_keys, char_budget, item.path, lines, line_no,
                         self.candidate_context_lines, f"{framework} entry point",
@@ -277,34 +307,134 @@ class EvidenceCollector:
                         return result
         return result
 
-    def _collect_candidates(self, files, patterns, kind, reason, slices, slice_keys, char_budget):
-        result: list[CodePointEvidence] = []
+    def _collect_candidates(
+        self, files, patterns, kind, reason, finding, target_paths,
+        slices, slice_keys, char_budget,
+    ):
+        """Collect and rank candidates globally instead of truncating by file order."""
+        ranked: list[tuple[int, str, int, str, str, list[str]]] = []
+        relevant_terms = self._finding_terms(finding)
         for item in files:
-            if self._is_sensitive_env(item.path) or self._is_non_code(item.path):
+            if (
+                self._is_sensitive_env(item.path)
+                or self._is_non_code(item.path)
+                or self._is_test_path(item.path)
+                or self._is_analysis_excluded(item.path)
+            ):
                 continue
             lines = item.content.splitlines()
+            ignored_lines = self._non_executable_lines(item.path, item.content)
             for line_no, line in enumerate(lines, 1):
+                if line_no in ignored_lines or self._looks_like_comment(line):
+                    continue
                 for pattern in patterns:
                     match = pattern.search(line)
                     if not match:
                         continue
-                    snippet_id = self._add_slice(
-                        slices, slice_keys, char_budget, item.path, lines, line_no,
-                        self.candidate_context_lines, reason,
+                    symbol = self._nearest_symbol(lines, line_no)
+                    score = self._candidate_score(
+                        item.path, symbol, line, target_paths, relevant_terms,
                     )
-                    result.append(CodePointEvidence(
-                        symbol=self._nearest_symbol(lines, line_no),
-                        path=item.path,
-                        line=line_no,
-                        kind=kind,
-                        pattern=match.group(0)[:120],
-                        reason=reason,
-                        snippet_id=snippet_id,
+                    ranked.append((
+                        score, item.path, line_no, symbol,
+                        match.group(0)[:120], lines,
                     ))
                     break
-                if len(result) >= self.max_candidates_per_kind:
-                    return result
+
+        # Keep evidence diverse: repeated keyword hits in one method/file must
+        # not consume the entire bounded context.
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+        selected: list[tuple[int, str, int, str, str, list[str]]] = []
+        seen_symbols: set[tuple[str, str]] = set()
+        per_file: dict[str, int] = {}
+        for candidate in ranked:
+            _, path, _, symbol, _, _ = candidate
+            identity = (path, symbol)
+            if identity in seen_symbols or per_file.get(path, 0) >= 4:
+                continue
+            seen_symbols.add(identity)
+            per_file[path] = per_file.get(path, 0) + 1
+            selected.append(candidate)
+            if len(selected) >= self.max_candidates_per_kind:
+                break
+
+        result: list[CodePointEvidence] = []
+        for _, path, line_no, symbol, matched, lines in selected:
+            snippet_id = self._add_slice(
+                slices, slice_keys, char_budget, path, lines, line_no,
+                self.candidate_context_lines, reason,
+            )
+            result.append(CodePointEvidence(
+                symbol=symbol,
+                path=path,
+                line=line_no,
+                kind=kind,
+                pattern=matched,
+                reason=reason,
+                snippet_id=snippet_id,
+            ))
         return result
+
+    @staticmethod
+    def _finding_terms(finding: NormalizedVulnerability) -> set[str]:
+        text = " ".join([
+            finding.vulnerability_type or "",
+            *finding.evidence,
+            *[location.function or "" for location in finding.locations],
+        ]).lower()
+        stop = {
+            "cwe", "vulnerability", "security", "function", "version",
+            "with", "from", "that", "this", "key", "public", "application",
+            "使用", "允许", "攻击者", "验证",
+        }
+        return {
+            term for term in re.findall(r"[a-z][a-z0-9_]{2,}|[\u4e00-\u9fff]{2,6}", text)
+            if term not in stop
+        }
+
+    @staticmethod
+    def _candidate_score(path: str, symbol: str, line: str, target_paths: set[str], terms: set[str]) -> int:
+        path_parts = PurePosixPath(path).parts
+        score = 0
+        if path in target_paths:
+            score += 120
+        for target in target_paths:
+            target_parts = PurePosixPath(target).parts
+            common = 0
+            for left, right in zip(path_parts, target_parts):
+                if left != right:
+                    break
+                common += 1
+            score = max(score, common * 12 + (35 if PurePosixPath(path).parent == PurePosixPath(target).parent else 0))
+        haystack = f"{path} {symbol} {line}".lower()
+        score += min(48, 8 * sum(term in haystack for term in terms))
+        if symbol and symbol != "<module>":
+            score += 8
+        if "draft" in {part.lower() for part in path_parts}:
+            score -= 12
+        if PurePosixPath(path).name == "__init__.py":
+            score -= 10
+        return score
+
+    @staticmethod
+    def _non_executable_lines(path: str, content: str) -> set[int]:
+        """Return Python comment/multiline-string lines that are not code facts."""
+        if PurePosixPath(path).suffix.lower() != ".py":
+            return set()
+        ignored: set[int] = set()
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(content).readline):
+                if token.type == tokenize.COMMENT:
+                    ignored.add(token.start[0])
+                elif token.type == tokenize.STRING and "\n" in token.string:
+                    ignored.update(range(token.start[0], token.end[0] + 1))
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            return ignored
+        return ignored
+
+    @staticmethod
+    def _looks_like_comment(line: str) -> bool:
+        return line.lstrip().startswith(("#", "//", "/*", "*", "<!--"))
 
     def _collect_dependency_evidence(self, finding, files):
         result: list[DependencyEvidence] = []
@@ -356,15 +486,24 @@ class EvidenceCollector:
             scanner.append("semgrep scan --config auto .")
 
         target_stems = {
-            PurePosixPath(location.file).stem.lower()
+            PurePosixPath(candidate).stem.lower()
             for location in finding.locations if location.file
+            for candidate in self._extract_path_candidates(location.file)
         }
         vuln_terms = {
             term for term in re.findall(r"[a-z0-9]+", finding.vulnerability_type.lower())
             if len(term) >= 4 and term not in {"vulnerability", "exposure"}
         }
+        ranked_test_paths = sorted(
+            test_paths,
+            key=lambda path: (
+                -sum(stem and stem in path.lower() for stem in target_stems),
+                -sum(term in path.lower() for term in vuln_terms),
+                path,
+            ),
+        )
         test_evidence = []
-        for path in test_paths[:20]:
+        for path in ranked_test_paths[:20]:
             lowered = path.lower()
             related = any(stem and stem in lowered for stem in target_stems) or any(
                 term in lowered for term in vuln_terms
@@ -463,8 +602,18 @@ class EvidenceCollector:
     def _find_symbol_line(lines, symbol):
         if not symbol:
             return None
-        pattern = re.compile(rf"\b{re.escape(symbol)}\b")
-        return next((index for index, line in enumerate(lines, 1) if pattern.search(line)), None)
+        candidates = re.findall(r"([A-Za-z_$][\w$]*)\s*\(", symbol)
+        candidates.extend(re.findall(r"\.([A-Za-z_$][\w$]*)", symbol))
+        candidates.append(symbol)
+        for candidate in dict.fromkeys(candidates):
+            pattern = re.compile(rf"\b{re.escape(candidate)}\b")
+            match = next(
+                (index for index, line in enumerate(lines, 1) if pattern.search(line)),
+                None,
+            )
+            if match is not None:
+                return match
+        return None
 
     @staticmethod
     def _nearest_symbol(lines, line_no):
@@ -476,16 +625,102 @@ class EvidenceCollector:
             for pattern in patterns:
                 match = pattern.search(lines[index])
                 if match:
-                    return match.group(1)
+                    name = match.group(1)
+                    if re.search(r"\b(?:def|function|func|fn)\s+", lines[index]):
+                        indentation = len(lines[index]) - len(lines[index].lstrip())
+                        for parent_index in range(index - 1, max(-1, index - 120), -1):
+                            class_match = re.search(
+                                r"\bclass\s+([A-Za-z_$][\w$]*)", lines[parent_index]
+                            )
+                            if not class_match:
+                                continue
+                            parent_indent = len(lines[parent_index]) - len(lines[parent_index].lstrip())
+                            if parent_indent < indentation:
+                                return f"{class_match.group(1)}.{name}"
+                    return name
         return "<module>"
 
     @staticmethod
     def _match_path(expected, file_map):
+        matches = EvidenceCollector._match_paths(expected, file_map)
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _match_paths(expected, file_map) -> list[str]:
+        """Resolve every concrete path mentioned by a descriptive location.
+
+        Findings often contain values such as ``pkg/claims.py or jwt.py — decode``.
+        Returning only the first match silently discards useful context and makes later
+        agents rediscover it.  Relative sibling candidates are expanded against the
+        first qualified path before suffix matching.
+        """
         clean = EvidenceCollector._clean_path(expected)
         if clean in file_map:
-            return clean
+            return [clean]
         matches = [path for path in file_map if path.endswith("/" + clean) or clean.endswith("/" + path)]
-        return sorted(matches, key=len)[0] if matches else None
+        if matches:
+            return [sorted(matches, key=len)[0]]
+        # ── 多候选路径 + 描述文字解析 ──
+        # 处理 "a.py 或 b.py — 描述" / "x.go or y.go — notes" 这类格式
+        candidates = EvidenceCollector._extract_path_candidates(expected)
+        parent = next(
+            (str(PurePosixPath(candidate).parent) for candidate in candidates if "/" in candidate),
+            "",
+        )
+        expanded: list[str] = []
+        for candidate in candidates:
+            expanded.append(candidate)
+            if parent and "/" not in candidate:
+                expanded.append(f"{parent}/{candidate}")
+
+        resolved: list[str] = []
+        for candidate in dict.fromkeys(expanded):
+            if candidate in file_map and candidate not in resolved:
+                resolved.append(candidate)
+                continue
+            suffix_matches = [
+                path for path in file_map
+                if path.endswith("/" + candidate) or candidate.endswith("/" + path)
+            ]
+            if suffix_matches:
+                preferred = sorted(
+                    suffix_matches,
+                    key=lambda path: (0 if parent and f"/{parent}/" in f"/{path}/" else 1, len(path)),
+                )[0]
+                if preferred not in resolved:
+                    resolved.append(preferred)
+        return resolved
+
+    @staticmethod
+    def _extract_path_candidates(raw: str) -> list[str]:
+        """从多候选 + 描述文字中提取单个文件路径候选列表。
+
+        "authlib/jose/rfc7519/claims.py 或 jwt.py — JWT 解码逻辑"
+        → ["authlib/jose/rfc7519/claims.py", "jwt.py"]
+        """
+        # 去掉尾部描述文字（— 或 - 之后，但保留路径中的 -）
+        text = raw.strip()
+        # 只在空格+破折号+空格模式处截断，避免截断路径名中的连字符
+        for sep in (" — ", " – ", " - ", "：", ": "):
+            idx = text.find(sep)
+            if idx > 0:
+                text = text[:idx]
+                break
+        # 按常见的多候选分隔符拆分
+        parts = re.split(r'\s*(?:或|或者|or|OR|Or)\s*|\s*[|,;，；、]\s*', text)
+        path_pattern = re.compile(
+            r'[\w./-]+\.(?:py|js|ts|tsx|jsx|go|java|c|cc|cpp|h|hpp|rs|rb|php|cs|'
+            r'yaml|yml|json|toml|ini|cfg|xml|html|css|vue|svelte|sql|kt|scala|swift|'
+            r'm|mm|sh|bash|ps1|bat|cmd|dockerfile|makefile|cmake|gradle)',
+            re.IGNORECASE,
+        )
+        candidates: list[str] = []
+        for part in parts:
+            for match in path_pattern.findall(part.strip()):
+                cleaned = EvidenceCollector._clean_path(match)
+                if cleaned and cleaned not in candidates:
+                    candidates.append(cleaned)
+        return candidates
 
     @staticmethod
     def _clean_path(path):
@@ -523,7 +758,12 @@ class EvidenceCollector:
 
     @staticmethod
     def _is_non_code(path):
-        return EvidenceCollector._basename(path) in _MANIFESTS or PurePosixPath(path).suffix.lower() in {".md", ".txt", ".lock"}
+        return PurePosixPath(path).suffix.lower() not in _ANALYSIS_CODE_EXTENSIONS
+
+    @staticmethod
+    def _is_analysis_excluded(path):
+        parts = {part.lower() for part in PurePosixPath(path).parts}
+        return bool(parts.intersection(_ANALYSIS_EXCLUDED_PARTS))
 
     @staticmethod
     def _redact_line(line):

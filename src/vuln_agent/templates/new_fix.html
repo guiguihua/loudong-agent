@@ -180,8 +180,9 @@
       <div class="policy-grid">
         <label>运行模式
           <select name="run_mode" x-model="runMode">
-            <option value="deep">deep（推荐）</option>
-            <option value="fast">fast</option>
+            <option value="balanced">balanced（推荐）</option>
+            <option value="fast">fast（快速审查）</option>
+            <option value="deep">deep（复杂高危）</option>
           </select>
         </label>
         <label><input type="checkbox" name="use_llm" value="1" x-model="llm"> 启用 LLM 推理</label>
@@ -227,7 +228,7 @@ document.addEventListener('alpine:init', () => {
     reportMode: 'form',
     sourceMode: 'upload',
     rawReport: '',
-    runMode: 'fast',
+    runMode: 'balanced',
     llm: {{ 'true' if has_llm else 'false' }},
     submitting: false,
     taskId: null,
@@ -353,7 +354,7 @@ document.addEventListener('alpine:init', () => {
         payload.repo_id = this.repoId || payload.repo_id || '';
         payload.branch = this.branch || payload.branch || '';
         payload.raw_report = this.rawReport || payload.raw_report || '';
-        payload.run_mode = this.runMode || payload.run_mode || 'deep';
+        payload.run_mode = this.runMode || payload.run_mode || 'balanced';
         payload.use_llm = !!this.llm;
 
         const hidden = document.getElementById('source-files-hidden');

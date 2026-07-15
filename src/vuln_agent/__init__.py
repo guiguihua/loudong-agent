@@ -9,6 +9,7 @@ from .normalization import VulnerabilityNormalizer
 from .orchestration import PatchRepairLoopOrchestrator
 from .patching import PatchGenerationAgent, PatchValidationAgent
 from .reporting import RemediationReportAgent
+from .reasoning import PipelineMode, ReasoningMode
 from .remediation import RemediationPlanAgent
 from .root_cause import RootCauseAnalysisAgent
 from .runner import run_dict, run_file
@@ -25,6 +26,8 @@ __all__ = [
     "PatchGenerationAgent",
     "PatchRepairLoopOrchestrator",
     "PatchValidationAgent",
+    "PipelineMode",
+    "ReasoningMode",
     "RemediationPlanAgent",
     "RemediationReportAgent",
     "RootCauseAnalysisAgent",
