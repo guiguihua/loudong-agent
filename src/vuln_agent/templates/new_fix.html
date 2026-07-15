@@ -54,9 +54,10 @@
         <div x-show="sourceMode === 'upload'" class="drop-zone"
              @dragover.prevent="$el.classList.add('dragover')"
              @dragleave.prevent="$el.classList.remove('dragover')"
-             @drop.prevent="handleSourceDrop($event)">
+             @drop.prevent="handleSourceDrop($event)"
+             @click="$refs.sourceFileInput.click()">
           拖拽源码文件到此处，或点击选择
-          <input type="file" multiple @change="handleSourceSelect($event)">
+          <input type="file" multiple @change="handleSourceSelect($event)" x-ref="sourceFileInput">
         </div>
         <div x-show="sourceMode === 'paste'" class="form-group">
           <label>文件路径</label>
