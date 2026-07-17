@@ -16,6 +16,10 @@
     <div class="stat-label">成功</div>
   </div>
   <div class="card stat-card">
+    <div class="stat-value text-yellow">{{ stats.blocked }}</div>
+    <div class="stat-label">阻断 / 待复核</div>
+  </div>
+  <div class="card stat-card">
     <div class="stat-value text-red">{{ stats.failed }}</div>
     <div class="stat-label">失败</div>
   </div>
@@ -59,6 +63,8 @@
         <td>
           {% if t.status == 'succeeded' %}
             <span class="badge badge-success">✅ 成功</span>
+          {% elif t.status == 'blocked' %}
+            <span class="badge badge-blocked">⚠️ 阻断</span>
           {% elif t.status == 'failed' %}
             <span class="badge badge-failed">❌ 失败</span>
           {% elif t.status == 'running' %}

@@ -27,7 +27,7 @@ class StageEvent:
 @dataclass
 class TaskInfo:
     task_id: str
-    status: str = "pending"  # pending | running | succeeded | failed
+    status: str = "pending"  # pending | running | succeeded | blocked | failed
     progress: str = "等待开始..."
     stage: int = 0  # 0=创建, 1=标准化, 2=影响面, 3=根因, 4=补丁, 5=验证, 6=报告
     result: dict[str, Any] | None = None
@@ -141,10 +141,10 @@ class TaskManager:
             for k, v in kwargs.items():
                 if hasattr(info, k):
                     setattr(info, k, v)
-            if kwargs.get("status") in ("succeeded", "failed"):
+            if kwargs.get("status") in ("succeeded", "blocked", "failed"):
                 info.finished_at = time.time()
         # 持久化在锁外进行（避免 I/O 阻塞锁）
-        if kwargs.get("status") in ("succeeded", "failed"):
+        if kwargs.get("status") in ("succeeded", "blocked", "failed"):
             self._persist_task(info)
         return info
 
@@ -162,9 +162,16 @@ class TaskManager:
         with self._lock:
             total = len(self._tasks)
             succeeded = sum(1 for t in self._tasks.values() if t.status == "succeeded")
+            blocked = sum(1 for t in self._tasks.values() if t.status == "blocked")
             failed = sum(1 for t in self._tasks.values() if t.status == "failed")
-            pending = total - succeeded - failed
-        return {"total": total, "succeeded": succeeded, "failed": failed, "pending": pending}
+            pending = total - succeeded - blocked - failed
+        return {
+            "total": total,
+            "succeeded": succeeded,
+            "blocked": blocked,
+            "failed": failed,
+            "pending": pending,
+        }
 
     # ── Private ──
 

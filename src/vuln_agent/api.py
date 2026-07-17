@@ -250,7 +250,7 @@ def create_app() -> FastAPI:
         info = task_manager.get(task_id)
         if info is None:
             return JSONResponse({"error": "任务不存在"}, status_code=404)
-        if info.status not in ("succeeded", "failed"):
+        if info.status not in ("succeeded", "blocked", "failed"):
             return {"task_id": task_id, "ready": False, "status": info.status}
         return {"task_id": task_id, "ready": True, "result": info.result}
 
@@ -924,8 +924,10 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             tool_results = _manual_review_validation_results()
         workspace = Path(body.get("source_dir") or Path.cwd()).resolve()
         from .evidence import EvidenceCollector
+        from .routing import RepairTaskClassifier
         task_manager.update(task_id, progress="收集并切分代码证据...", stage=1)
         evidence_bundle = EvidenceCollector().collect(finding, sources, repo, eng)
+        repair_route = RepairTaskClassifier().route(finding, evidence_bundle)
 
         code_ctx = _build_code_context(finding, body, {})
         asset_ctx = _build_asset_context(finding, body, {})
@@ -1029,8 +1031,12 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             patch_generation_agent=PatchGenerationAgent(
                 PatchGenerationPolicy(), llm=llm, workspace=workspace,
                 pipeline_mode=run_mode,
+                repair_route=repair_route,
             ),
-            validation_toolchain=ValidationToolchain(executor=validation_executor),
+            validation_toolchain=ValidationToolchain(
+                required_layers=repair_route.verification_profile.required_layers,
+                executor=validation_executor,
+            ),
             failure_analysis_agent=FailureAnalysisAgent(
                 llm=llm, workspace=workspace, pipeline_mode=run_mode,
             ),
@@ -1081,6 +1087,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             "impact": impact.to_dict(),
             "root_cause": root_cause.to_dict(),
             "evidence_bundle": evidence_bundle.to_dict(),
+            "repair_route": repair_route.to_dict(),
             "status": result.status.value,
             "run_mode": run_mode,
             "llm_model": llm.model,
@@ -1094,10 +1101,16 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             },
         }
         if result.attempts:
+            from .quality import assess_patch_quality
             attempt = result.attempts[-1]
             output["remediation_plan"] = attempt.remediation_plan.to_dict()
             output["patch_candidate"] = attempt.patch_candidate.to_dict()
             output["patch_validation"] = attempt.validation.to_dict()
+            output["patch_quality"] = assess_patch_quality(
+                attempt.patch_candidate,
+                attempt.remediation_plan,
+                attempt.validation,
+            )
         if result.final_report is not None:
             output["report"] = result.final_report.to_dict()
             output["report_markdown"] = result.final_report.pr_description_markdown
@@ -1112,7 +1125,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
                 progress = "⚠️ 候选补丁已生成；部分验证待补充，需人工复核"
             else:
                 progress = "⚠️ 流程完成：补丁生成被阻断，需人工复核"
-            task_manager.update(task_id, status="succeeded", progress=progress, result=output)
+            task_manager.update(task_id, status="blocked", progress=progress, result=output)
         else:
             task_manager.update(task_id, status="failed", progress="❌ 修复失败",
                                 result=output,

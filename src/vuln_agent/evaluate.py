@@ -101,6 +101,13 @@ class CaseMetrics:
     attempt_count: int = 1
     # LLM 特有
     llm_fallback_count: int = 0  # LLM 解析失败回退到确定性模式的次数
+    executable_artifact_rate: float = 0.0
+    planned_change_coverage_rate: float = 0.0
+    validation_layer_pass_rate: float = 0.0
+    quality_gate_passed: bool = False
+    ready_for_automated_delivery: bool = False
+    false_success: bool = False
+    generated_test_contract_valid: bool = False
 
 
 @dataclass(slots=True)
@@ -201,6 +208,32 @@ class EvaluationRunner:
             metrics.patch_artifact_count = stats["artifact_count"]
             metrics.patch_changed_files_count = stats["changed_files_count"]
             metrics.patch_diff_lines = stats["diff_lines"]
+            patch_quality = result.get("patch_quality", {}) or {}
+            metrics.executable_artifact_rate = float(
+                patch_quality.get("executable_artifact_rate", 0.0)
+            )
+            metrics.planned_change_coverage_rate = float(
+                patch_quality.get("planned_change_coverage_rate", 0.0)
+            )
+            metrics.validation_layer_pass_rate = float(
+                patch_quality.get("validation_layer_pass_rate", 0.0)
+            )
+            metrics.quality_gate_passed = bool(
+                patch_quality.get("quality_gate_passed", False)
+            )
+            metrics.ready_for_automated_delivery = bool(
+                patch_quality.get("ready_for_automated_delivery", False)
+            )
+            metrics.generated_test_contract_valid = bool(
+                patch_quality.get("generated_test_contract_valid", False)
+            )
+            metrics.false_success = (
+                metrics.status == "succeeded"
+                and (
+                    (result.get("patch_candidate") or {}).get("status") != "generated"
+                    or (result.get("patch_validation") or {}).get("status") != "passed"
+                )
+            )
 
             # 尝试次数（从 patch_id 推断）
             pc = result.get("patch_candidate", {}) or {}
@@ -325,11 +358,23 @@ def _render_markdown(report: EvalReport) -> str:
         lines.append(f"| 指标 | 值 |")
         lines.append(f"|------|-----|")
         lines.append(f"| 成功率 | {summary['success_rate']}% ({summary['succeeded']}/{summary['total']}) |")
+        lines.append(f"| Verified Patch Rate | {summary.get('verified_patch_rate', 0)}% |")
+        lines.append(f"| 候选精确应用率 | {summary.get('exact_apply_rate', 0)}% |")
+        lines.append(f"| blocked/failed 误报成功数 | {summary.get('false_success_count', 0)} |")
+        lines.append(f"| Mandatory validation 覆盖率 | {summary.get('mandatory_validation_coverage', 0)}% |")
+        lines.append(f"| 双向安全测试契约有效率 | {summary.get('generated_test_contract_rate', 0)}% |")
+        lines.append(f"| 通用 Prompt 特例污染数 | {summary.get('prompt_contamination_count', 0)} |")
         lines.append(f"| 平均耗时 | {summary['avg_time_ms']:.0f} ms |")
         lines.append(f"| 最快 | {summary['min_time_ms']:.0f} ms |")
         lines.append(f"| 最慢 | {summary['max_time_ms']:.0f} ms |")
         lines.append(f"| 错误数 | {summary['errors']} |")
         lines.append("")
+        if summary.get("release_gates"):
+            lines.append("发布门禁：")
+            lines.append("")
+            for gate, passed in summary["release_gates"].items():
+                lines.append(f"- {'✅' if passed else '❌'} `{gate}`")
+            lines.append("")
 
     # LLM vs 确定性对比
     if report.comparison.get("pairs"):
@@ -544,6 +589,49 @@ def evaluate_all(
         "avg_time_ms": round(sum(times) / len(times), 1) if times else 0,
         "min_time_ms": round(min(times), 1) if times else 0,
         "max_time_ms": round(max(times), 1) if times else 0,
+        "verified_patch_rate": round(
+            sum(1 for m in all_metrics if m.ready_for_automated_delivery)
+            / len(all_metrics) * 100,
+            1,
+        ) if all_metrics else 0,
+        "exact_apply_rate": round(
+            sum(1 for m in all_metrics if m.executable_artifact_rate == 1.0)
+            / len(all_metrics) * 100,
+            1,
+        ) if all_metrics else 0,
+        "false_success_count": sum(1 for m in all_metrics if m.false_success),
+        "mandatory_validation_coverage": round(
+            sum(1 for m in all_metrics if m.validation_layer_pass_rate == 1.0)
+            / len(all_metrics) * 100,
+            1,
+        ) if all_metrics else 0,
+        "generated_test_contract_rate": round(
+            sum(1 for m in all_metrics if m.generated_test_contract_valid)
+            / len(all_metrics) * 100,
+            1,
+        ) if all_metrics else 0,
+    }
+    from .baseline import count_prompt_contamination
+    from .patching import PATCH_AGENT_PROMPT
+    from .remediation import REMEDIATION_AGENT_PROMPT
+    contamination = count_prompt_contamination([
+        PATCH_AGENT_PROMPT,
+        REMEDIATION_AGENT_PROMPT,
+    ])
+    summary["llm"]["prompt_contamination_count"] = contamination
+    summary["llm"]["release_gates"] = {
+        "exact_apply_rate_100": summary["llm"]["exact_apply_rate"] == 100.0,
+        "false_success_rate_0": summary["llm"]["false_success_count"] == 0,
+        "mandatory_validation_coverage_100": (
+            summary["llm"]["mandatory_validation_coverage"] == 100.0
+        ),
+        "generated_test_contract_rate_100": (
+            summary["llm"]["generated_test_contract_rate"] == 100.0
+        ),
+        "prompt_contamination_0": contamination == 0,
+        "verified_patch_rate_at_least_60": (
+            summary["llm"]["verified_patch_rate"] >= 60.0
+        ),
     }
 
     # 构建报告
@@ -582,6 +670,13 @@ def _metrics_to_dict(m: CaseMetrics) -> dict[str, Any]:
         "patch_diff_lines": m.patch_diff_lines,
         "attempt_count": m.attempt_count,
         "llm_fallback_count": m.llm_fallback_count,
+        "executable_artifact_rate": m.executable_artifact_rate,
+        "planned_change_coverage_rate": m.planned_change_coverage_rate,
+        "validation_layer_pass_rate": m.validation_layer_pass_rate,
+        "quality_gate_passed": m.quality_gate_passed,
+        "ready_for_automated_delivery": m.ready_for_automated_delivery,
+        "false_success": m.false_success,
+        "generated_test_contract_valid": m.generated_test_contract_valid,
     }
 
 

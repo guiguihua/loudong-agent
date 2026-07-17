@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 import os
+import re
+import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +51,7 @@ from .models import (
 
 if TYPE_CHECKING:
     from .llm import LLMBackend
+    from .routing import RepairRoute
 
 PATCH_AGENT_PROMPT = """你是一位资深安全代码修复工程师，负责生成精确的安全补丁。
 
@@ -69,13 +72,12 @@ PATCH_AGENT_PROMPT = """你是一位资深安全代码修复工程师，负责�
 7. 只依据漏洞报告和当前仓库源码、配置与测试生成补丁；不得假设、检索或照搬官方/上游修复
 8. 输出是供人工审查的候选补丁；不得写入、提交或合并到原始仓库
 
-## 最小修复边界（violation 会被 validation 拒绝）
-- 防御放在算法/调度层（alg-key 兼容性校验、algorithms 白名单、算法专属 prepare_key），
-  不改底层通用导入函数（如 OctKey.import_key、RSAKey.import_key）
-- 不删除已有算法注册（如 NoneAlgorithm）— 通过 algorithms 白名单控制可用性
-- 不删除现有功能路径（如 head['jwk'] key 解析）— 通过 alg 白名单防御
-- 不破坏现有测试语义 — 已有测试必须继续通过，不修改测试的预期行为
-- 修复应限定在：algorithms 白名单传递、alg-key 类型绑定、HMAC 入口的 key 类型校验
+## 修复边界（violation 会被 validation 拒绝）
+- 只修改修复安全不变量所必需的实现、配置、依赖声明和回归测试
+- 不得绕过或删除现有安全检查；若必须替换，应在补丁说明中给出源码证据
+- 不得通过修改既有测试预期来掩盖行为回归
+- 不得引入与根因无关的重构、格式化、日志或功能变更
+- 所有修改文件必须位于 remediation plan 的 allowed_files 中；发现范围遗漏时先阻断并重规划
 
 ## Diff 格式规范（严格遵守，失败会导致补丁被拒绝）
 - diff 头必须严格使用格式: --- a/{目标文件路径} 和 +++ b/{目标文件路径}
@@ -97,6 +99,7 @@ class PatchGenerationAgent(BaseAgent):
         llm: LLMBackend | None = None,
         workspace: Path | None = None,
         pipeline_mode: str = "balanced",
+        repair_route: RepairRoute | None = None,
     ):
         ws = workspace or Path.cwd()
         from .reasoning import stage_policy, StageExecution
@@ -115,6 +118,7 @@ class PatchGenerationAgent(BaseAgent):
             tool_budget=dict(self.stage_policy.tool_budget),
         )
         self.policy = policy
+        self.repair_route = repair_route
 
     def generate(
         self,
@@ -137,6 +141,15 @@ class PatchGenerationAgent(BaseAgent):
         from .reasoning import StageExecution
 
         blocked_reason = self._blocking_reason(remediation_plan, previous_attempt)
+        if (
+            blocked_reason is None
+            and self.repair_route is not None
+            and not self.repair_route.automation_eligible
+        ):
+            blocked_reason = (
+                "repair task is not eligible for automated patch generation: "
+                + ", ".join(self.repair_route.blocking_reasons)
+            )
         if blocked_reason:
             self.last_execution = StageExecution(
                 "patch", self.stage_policy.pipeline_mode.value,
@@ -145,31 +158,49 @@ class PatchGenerationAgent(BaseAgent):
             )
             return self._blocked_candidate(finding, remediation_plan, blocked_reason)
 
-        task = self._build_task(
-            finding, impact, root_cause, remediation_plan,
-            source_files, previous_attempt, evidence_bundle,
-        )
-        # Agent can inspect files and search code, but cannot mutate the source
-        # workspace. Candidate execution happens later in an isolated copy.
-        # Multi-file diffs are deliberately generated artifact-by-artifact.
-        # This is a response-size routing decision, not a scope restriction.
-        # Always use per-file generation for cross-file consistency (dependency-aware)
-        raw = self._generate_artifacts_by_file(
-            finding, root_cause, remediation_plan, source_files,
-            failure_reason="per-file generation with dependency-aware ordering",
-            previous_attempt=previous_attempt,
-            evidence_bundle=evidence_bundle,
-        )
+        # Specialist executors own manifest/source edits and let Git create
+        # final diffs from a verified disposable workspace.
+        from .sast_executor import SASTCodeRepairExecutor
+        from .sca_executor import SCADependencyRepairExecutor
+
+        sast_family = SASTCodeRepairExecutor.classify(finding)
+        if finding.dependency is not None and evidence_bundle is not None:
+            raw = SCADependencyRepairExecutor().execute(
+                finding,
+                remediation_plan,
+                source_files,
+                evidence_bundle,
+            )
+        elif sast_family and evidence_bundle is not None:
+            feedback = ""
+            if previous_attempt:
+                feedback = "; ".join(
+                    f"{item.check}: {item.reason}"
+                    for item in previous_attempt.failures
+                )
+            raw = SASTCodeRepairExecutor(
+                self.llm,
+                timeout_seconds=90,
+                max_attempts=2,
+            ).execute(
+                finding,
+                root_cause,
+                remediation_plan,
+                source_files,
+                evidence_bundle,
+                previous_feedback=feedback,
+            )
+        else:
+            # Unsupported families retain the dependency-aware per-file path
+            # until their specialist executor is implemented.
+            raw = self._generate_artifacts_by_file(
+                finding, root_cause, remediation_plan, source_files,
+                failure_reason="per-file generation with dependency-aware ordering",
+                previous_attempt=previous_attempt,
+                evidence_bundle=evidence_bundle,
+            )
 
         llm_calls = raw.get("llm_calls", 0) if isinstance(raw, dict) else 0
-        if not self._has_applicable_artifacts(raw):
-            # Fallback: try single-response ReAct generation
-            try:
-                raw = self.run(task)
-                if isinstance(raw, dict):
-                    llm_calls += int(raw.get("llm_calls", 0))
-            except Exception:
-                pass
         if not self._has_applicable_artifacts(raw):
             if isinstance(raw, dict):
                 reason = str(raw.get("blocked_reason") or "per-file generation produced no applicable unified diff")
@@ -187,7 +218,12 @@ class PatchGenerationAgent(BaseAgent):
             "patch", self.stage_policy.pipeline_mode.value,
             self.stage_policy.fast_path.value,
             llm_calls=llm_calls,
-            details={"artifacts_count": len(raw.get("artifacts", [])) if isinstance(raw, dict) else 0},
+            details={
+                "artifacts_count": len(raw.get("artifacts", [])) if isinstance(raw, dict) else 0,
+                "executor": raw.get("executor", "legacy_per_file") if isinstance(raw, dict) else "unknown",
+                "change_set": raw.get("change_set") if isinstance(raw, dict) else None,
+                "workspace_checks": raw.get("workspace_checks", []) if isinstance(raw, dict) else [],
+            },
         )
         return self._dict_to_patch_candidate(
             finding, remediation_plan, repository, raw, previous_attempt,
@@ -195,10 +231,13 @@ class PatchGenerationAgent(BaseAgent):
 
     @staticmethod
     def _has_applicable_artifacts(raw: dict) -> bool:
+        if not isinstance(raw, dict) or raw.get("blocked_reason"):
+            return False
         artifacts = raw.get("artifacts") if isinstance(raw, dict) else None
         return bool(artifacts) and all(
             isinstance(item, dict)
             and item.get("target")
+            and not item.get("needs_manual_fix", False)
             and "--- " in str(item.get("content", ""))
             and "+++ " in str(item.get("content", ""))
             and "@@" in str(item.get("content", ""))
@@ -237,6 +276,7 @@ class PatchGenerationAgent(BaseAgent):
         ]
 
         generation_errors: list[str] = []
+        hard_blockers: list[str] = []
         llm_calls = 0
         accumulated: dict[str, str] = {}
 
@@ -267,11 +307,13 @@ class PatchGenerationAgent(BaseAgent):
                 if sf:
                     found_gaps.append(sf.path)
             if found_gaps:
-                generation_errors.append(
+                scope_gap_reason = (
                     f"scope_gap: 根因涉及 {len(causal_files)} 文件，"
                     f"修复计划仅覆盖 {len(planned_files)} 个。"
                     f"以下文件在源码中存在但未被包含: {', '.join(found_gaps[:3])}"
                 )
+                generation_errors.append(scope_gap_reason)
+                hard_blockers.append(scope_gap_reason)
                 _safe_print(
                     f"  [PatchGeneration] 缺失的目标文件存在但未被计划: "
                     f"{', '.join(found_gaps[:3])} — 补丁可能不完整"
@@ -368,10 +410,12 @@ class PatchGenerationAgent(BaseAgent):
                     if not PatchGenerationAgent._verify_diff_applies(
                         test_artifact["content"], test_source.content or ""
                     ):
-                        generation_errors.append(
+                        test_apply_error = (
                             f"test diff does not cleanly apply to {test_source.path} "
                             f"(may need manual adjustment)"
                         )
+                        generation_errors.append(test_apply_error)
+                        hard_blockers.append(test_apply_error)
                     # ── 确定性 API 契约检查（防止测试幻觉）──
                     api_issues = PatchGenerationAgent._check_test_api_contract(
                         test_artifact, source_files, api_surface,
@@ -447,10 +491,12 @@ class PatchGenerationAgent(BaseAgent):
             missing_required = [g for g in coverage_gaps if g["causally_required"]]
             missing_optional = [g for g in coverage_gaps if not g["causally_required"]]
             if missing_required:
-                generation_errors.append(
+                coverage_reason = (
                     f"planned_change_coverage: 因果必需文件缺失补丁 — "
                     + ", ".join(g["file"] for g in missing_required)
                 )
+                generation_errors.append(coverage_reason)
+                hard_blockers.append(coverage_reason)
                 # 因果必需文件缺失 → 阻塞返回
                 failure_reason += (
                     "; planned_change_coverage: missing causally required artifacts: "
@@ -477,7 +523,9 @@ class PatchGenerationAgent(BaseAgent):
                 accumulated[norm_path] = art["content"]
 
         blocked_reason = None
-        if not artifacts:
+        if hard_blockers:
+            blocked_reason = "; ".join(dict.fromkeys(hard_blockers))
+        elif not artifacts:
             blocked_reason = f"{failure_reason}; " + "; ".join(generation_errors)
 
         # 统计 LLM 调用：继承 fallback 计数 + 新生成的 artifact + 跨文件校验
@@ -556,8 +604,8 @@ class PatchGenerationAgent(BaseAgent):
     ) -> tuple[list[dict], list[dict]]:
         """逐阶段生成代码补丁：阶段内并行，阶段间串行。
 
-        causally_required 文件的 diff 即使无法验证为可应用，也会被保留为
-        best-effort artifact（带 needs_manual_fix 标记），避免覆盖率缺口。
+        无法精确应用的 diff 不会进入候选补丁；因果必需文件失败将由覆盖
+        检查转化为显式阻断，避免占位补丁被误当成真实修复。
         """
         artifacts: list[dict] = []
         changed_files: list[dict] = []
@@ -566,42 +614,12 @@ class PatchGenerationAgent(BaseAgent):
             change_map[PatchGenerationAgent._norm_path(c.file)] = c
 
         def _append_artifact(art, source, change, is_causal):
-            """添加 artifact 到输出，causally_required 文件失败时保留 best-effort。"""
+            """Only append artifacts that exactly apply to the supplied source."""
             if art is None:
                 if is_causal:
-                    # causally_required 文件：LLM 完全没生成 diff → 创建占位 artifact
-                    placeholder = {
-                        "patch_type": change.change_type or "code",
-                        "target": source.path,
-                        "content": (
-                            f"--- a/{source.path}\n"
-                            f"+++ b/{source.path}\n"
-                            f"@@ -1,0 +1,4 @@\n"
-                            f"+ # ⚠️ BEST-EFFORT PLACEHOLDER — 因果必需文件\n"
-                            f"+ # {source.path} — LLM 未能生成有效补丁\n"
-                            f"+ # 原因: {generation_errors[-1] if generation_errors else '未知'}\n"
-                            f"+ # 此文件在 RootCause source→sink 因果链上，必须人工审查修复\n"
-                        ),
-                        "description": (
-                            f"⚠️ BEST-EFFORT PLACEHOLDER: {change.description}。"
-                            f"LLM 未能为此因果必需文件生成有效 unified diff，"
-                            f"需人工审查 {source.path} 并手动编写补丁。"
-                        ),
-                        "needs_manual_fix": True,
-                        "fix_reason": (
-                            f"{source.path} 是因果必需文件但 LLM 未生成有效 diff。"
-                            f" 原因: {generation_errors[-1] if generation_errors else '未知'}"
-                        ),
-                    }
-                    artifacts.append(placeholder)
-                    changed_files.append({
-                        "file": source.path, "change_type": placeholder["patch_type"],
-                        "reason": change.reason,
-                    })
-                    accumulated[PatchGenerationAgent._norm_path(source.path)] = placeholder["content"]
-                    _safe_print(
-                        f"  [PatchGeneration] ⚠️ 因果必需文件 {source.path} "
-                        f"LLM 完全未生成 diff，保留占位 artifact 待人工修正"
+                    generation_errors.append(
+                        f"required_artifact_missing: {source.path} — "
+                        "LLM 未生成可精确应用的 unified diff"
                     )
                 else:
                     generation_errors.append(f"no valid unified diff: {source.path}")
@@ -617,30 +635,14 @@ class PatchGenerationAgent(BaseAgent):
                 })
                 accumulated[PatchGenerationAgent._norm_path(source.path)] = art["content"]
             elif is_causal:
-                # causally_required 文件保留 best-effort artifact
-                art["needs_manual_fix"] = True
-                art["fix_reason"] = (
-                    f"diff 无法通过 tolerant apply 验证，但 {source.path} "
-                    f"是因果必需文件，保留此 artifact 供人工修正"
-                )
-                artifacts.append(art)
-                changed_files.append({
-                    "file": source.path, "change_type": art["patch_type"],
-                    "reason": change.reason,
-                })
-                accumulated[PatchGenerationAgent._norm_path(source.path)] = art["content"]
                 generation_errors.append(
-                    f"best_effort_artifact: {source.path} — "
-                    f"diff 无法验证为可应用（因果必需文件，保留待人工修正）"
-                )
-                _safe_print(
-                    f"  [PatchGeneration] ⚠️ 因果必需文件 {source.path} "
-                    f"diff 不可应用，保留为 best-effort"
+                    f"required_artifact_not_applicable: {source.path} — "
+                    "diff 无法通过精确应用校验"
                 )
             else:
                 generation_errors.append(
                     f"diff does not apply to {source.path} — "
-                    f"tolerant application failed after quality checks"
+                    "exact application failed after quality checks"
                 )
 
         for stage_paths in stages:
@@ -1225,8 +1227,6 @@ ID: {finding.finding_id}
         if getattr(change, "causally_required", False):
             return True, "causally_required"
 
-        path = PatchGenerationAgent._norm_path(getattr(change, "file", ""))
-        basename = Path(path).name.lower()
         text = " ".join(
             str(getattr(change, attr, "") or "")
             for attr in ("description", "reason", "change_type")
@@ -1261,13 +1261,6 @@ ID: {finding.finding_id}
             return True, "security_control_change"
         if has_security and has_strategy:
             return True, "strategy_critical_security_file"
-
-        # Auth/JWT libraries often put the central algorithm/key binding at
-        # these module names.  Only promote them when the plan text is security
-        # related, so ordinary business edits to a file called jwt.py are not
-        # over-constrained.
-        if basename in {"jws.py", "jwt.py", "jws_algs.py"} and has_security:
-            return True, "central_jose_control_file"
 
         return False, "optional_planned_change"
 
@@ -1437,25 +1430,40 @@ ID: {finding.finding_id}
 
     @staticmethod
     def _verify_diff_applies(diff_content: str, source_content: str) -> bool:
-        """Verify a unified diff can be applied to source content.
-
-        Uses tolerant (fuzzy-context) application to handle LLM-generated diffs
-        with slightly incorrect hunk headers or hallucinated context lines.
-        """
+        """Verify a unified diff with the same exact semantics used at execution."""
         if not diff_content or not source_content:
             return False
         if "--- " not in diff_content or "+++ " not in diff_content:
             return False
         if "@@" not in diff_content:
-            # No hunks = no actual changes; vacuously applicable
-            return True
+            return False
 
-        # Use the same tolerant apply logic as the execution module
-        from .execution import WorkspaceValidationExecutor
-        result = WorkspaceValidationExecutor._apply_single_diff_tolerant(
-            source_content, diff_content
-        )
-        return result is not None
+        target_match = re.search(r"^\+\+\+\s+(?:b/)?(\S+)", diff_content, re.MULTILINE)
+        if not target_match or target_match.group(1) == "/dev/null":
+            return False
+        relative = Path(target_match.group(1))
+        if relative.is_absolute() or ".." in relative.parts:
+            return False
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="vuln-agent-diff-check-") as tmp:
+                root = Path(tmp)
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(source_content, encoding="utf-8")
+                patch_file = root / "candidate.patch"
+                patch_file.write_text(diff_content.rstrip() + "\n", encoding="utf-8")
+                completed = subprocess.run(
+                    ["git", "apply", "--check", str(patch_file)],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                return completed.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
 
     @staticmethod
     def _extract_first_diff(text: str) -> str | None:
@@ -1667,6 +1675,11 @@ ID: {finding.finding_id}
             diff_content, source_content
         )
         warnings.extend(context_issues)
+
+        # Exact applicability is a hard contract. Fuzzy context matching can
+        # conceal hallucinated lines or incorrect hunk headers.
+        if not PatchGenerationAgent._verify_diff_applies(diff_content, source_content):
+            issues.append("diff 无法通过 git apply --check 精确应用到目标源码")
 
         # 5. Import existence verification (blocking — import errors cause hard failures)
         if source_files and expected_target.endswith(".py"):
@@ -2881,50 +2894,62 @@ ID: {finding.finding_id}
                 if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
             for a in artifacts
         )
-        scope_warnings = []
-        # File count and diff lines are review signals, not hard blockers.
-        # The agent determines causal necessity; the plan baseline is advisory.
-        plan_baseline = max(len(remediation_plan.planned_changes), 1)
-        if len(actual_files) > plan_baseline + 5:
-            scope_warnings.append(
-                f"补丁涉及 {len(actual_files)} 个文件，显著超过方案的 {plan_baseline} 个计划文件；请人工确认必要性。"
-            )
-        if estimated_diff_lines > remediation_plan.patch_boundaries.maximum_diff_lines:
-            scope_warnings.append(
-                f"补丁约 {estimated_diff_lines} 行，超过方案审查基线 "
-                f"{remediation_plan.patch_boundaries.maximum_diff_lines}；需加强回归和人工审查。"
-            )
-        # Out-of-scope files: the agent may legitimately discover additional
-        # causally-required files not captured by the plan.  Flag for review
-        # instead of blocking.
-        out_of_scope_warnings = [
-            f"artifact outside planned scope (需确认必要性): {path}"
-            for path in out_of_scope
+        violations = [
+            f"artifact outside planned scope: {path}" for path in out_of_scope
         ]
+        max_files = remediation_plan.patch_boundaries.maximum_changed_files
+        max_lines = remediation_plan.patch_boundaries.maximum_diff_lines
+        if len(actual_files) > max_files:
+            violations.append(
+                f"changed file count {len(actual_files)} exceeds boundary {max_files}"
+            )
+        if estimated_diff_lines > max_lines:
+            violations.append(
+                f"estimated diff lines {estimated_diff_lines} exceeds boundary {max_lines}"
+            )
+        manual_fix_targets = sorted(
+            artifact.target for artifact in artifacts if artifact.needs_manual_fix
+        )
+        if manual_fix_targets:
+            violations.append(
+                "manual-fix artifacts are not executable candidates: "
+                + ", ".join(manual_fix_targets)
+            )
+        blocked_reason = str(raw.get("blocked_reason") or "").strip() or None
+        if blocked_reason:
+            violations.append(blocked_reason)
+        within_boundaries = not violations
         policy_check = PatchPolicyCheck(
-            allowed_files_only=True,  # unplanned files don't invalidate the patch
+            allowed_files_only=not out_of_scope,
             forbidden_changes_detected=False,
             changed_files_count=len(changed_files),
             estimated_diff_lines=estimated_diff_lines,
-            within_patch_boundaries=True,  # only forbidden_changes can hard-block
-            violations=[*out_of_scope_warnings, *scope_warnings],
+            within_patch_boundaries=within_boundaries,
+            violations=violations,
         )
 
         attempt = 1 if previous_attempt is None else previous_attempt.attempt + 1
         return PatchCandidate(
             patch_id=f"patch-{finding.finding_id}-{attempt:03d}",
             finding_id=finding.finding_id,
-            status=PatchCandidateStatus.GENERATED,
+            status=(
+                PatchCandidateStatus.GENERATED
+                if within_boundaries
+                else PatchCandidateStatus.BLOCKED
+            ),
             summary=raw.get("summary", ""),
             artifacts=artifacts,
             changed_files=changed_files,
             test_changes=list(remediation_plan.required_tests),
             security_notes=raw.get("security_notes", []),
             assumptions=raw.get("assumptions", []),
-            risks=list(dict.fromkeys([*raw.get("risks", []), *scope_warnings])),
+            risks=list(dict.fromkeys([*raw.get("risks", []), *violations])),
             validation_plan=PatchGenerationAgent._validation_plan(remediation_plan, repository),
             policy_check=policy_check,
-            blocked_reason=raw.get("blocked_reason"),
+            blocked_reason=(
+                blocked_reason
+                or ("; ".join(violations) if violations else None)
+            ),
             needs_human_review=bool(raw.get("needs_human_review", True)),
         )
 
@@ -3053,7 +3078,9 @@ class PatchValidationAgent:
             return VerificationCheck("planned_change_artifacts", VerificationCheckStatus.PASSED,
                                      "no code-level planned changes to verify")
 
-        artifact_targets = {a.target for a in candidate.artifacts}
+        artifact_targets = {
+            a.target for a in candidate.artifacts if not a.needs_manual_fix
+        }
 
         def _matches(expected: str, targets: set[str]) -> bool:
             candidates = PatchValidationAgent._expected_file_candidates(expected)

@@ -75,10 +75,10 @@ REMEDIATION_AGENT_PROMPT = """你是一位资深安全修复工程师，负责�
 - 不得把”可能更安全”当成扩大范围的充分理由；每项变更都要有可追溯证据，同时保证补丁可审查、可回滚、可验证。
 - causally_required: 根因 source→sink 因果链直接命中的文件必须标记 causally_required=true。这些文件是漏洞可达路径上的硬约束——遗漏任何一个都会导致漏洞在对应调用路径中仍然可达。非因果链上的辅助文件（如测试、日志、格式调整）标记为 false。标记为 true 的文件如果最终补丁未覆盖，会被 validation 直接拒绝。
 - forbidden_changes（patch_boundaries 中的禁止变更清单）必须是具体的、可验证的约束，而非泛泛的"不要破坏安全"。违反 forbidden_changes 的补丁会在 validation 被拒绝。禁止变更应聚焦"修复层级"而非"不要引入 bug"：
-  - 禁止在通用 key import 层添加防御 → 防御放在算法专属入口（如 HMACAlgorithm.prepare_key）
-  - 禁止删除已有算法注册 → 通过 algorithms 白名单控制可用算法
-  - 禁止删除现有功能路径 → 通过 alg 白名单和 alg-key 类型绑定防御
-  - 禁止破坏现有测试语义 → 补丁必须向后兼容
+  - 禁止绕过或删除现有安全检查
+  - 禁止修改既有测试预期来掩盖回归
+  - 禁止改动与根因、兼容性或必要验证无关的文件
+  - 禁止扩大公共 API 或权限边界，除非有明确源码证据和回归验证
 
 确认分析完成后，调用 submit_final_result 工具提交最终结果。"""
 
@@ -1143,18 +1143,10 @@ planned_changes.file 必须是 EvidenceBundle/当前仓库中唯一存在的单�
             patch_boundaries=PatchBoundaries(
                 allowed_files=[change.file for change in planned_changes],
                 forbidden_changes=[
-                    # ── 最小修复边界（违反这些规则的补丁会在 validation 被拒绝）──
-                    "最小修复边界: 不得在通用 key import 层添加防御（如 OctKey.import_key 拒绝 PEM）"
-                    " — 防御必须放在算法专属入口（如 HMACAlgorithm.prepare_key），"
-                    " 保持底层导入函数的通用契约不变",
-                    "最小修复边界: 不得删除已有算法注册（如 NoneAlgorithm from JWS_ALGORITHMS）"
-                    " — 应通过 algorithms 白名单控制可用算法，保留库的标准兼容能力",
-                    "最小修复边界: 不得删除现有功能路径（如 JWS header jwk key 解析分支）"
-                    " — 算法混淆防御应通过 alg 白名单和 alg-key 类型绑定实现",
-                    "最小修复边界: 不得破坏现有测试语义 — 已有测试（如 test_compact_none）"
-                    " 必须继续通过，补丁必须向后兼容",
-                    "修复层级约束: 安全防御放在算法调度层（alg-key 兼容性校验）和"
-                    " 算法专属入口（HMAC.prepare_key），不改通用导入层和算法注册表",
+                    "不得绕过、弱化或删除现有安全检查",
+                    "不得修改既有测试预期来掩盖行为回归",
+                    "不得修改与根因、兼容性或必要验证无直接关系的文件",
+                    "不得扩大公共 API、信任边界或权限范围，除非计划中有证据和验证",
                 ],
                 maximum_changed_files=max(len(planned_changes) + 3, 8),
                 maximum_diff_lines=500,

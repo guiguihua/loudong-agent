@@ -24,9 +24,9 @@ document.addEventListener('alpine:init', () => {
         this.progress = data.progress;
         this.stage = data.stage;
 
-        if (data.status === 'succeeded' || data.status === 'failed') {
+        if (data.status === 'succeeded' || data.status === 'blocked' || data.status === 'failed') {
           this.loading = false;
-          if (data.status === 'succeeded') {
+          if (data.status === 'succeeded' || data.status === 'blocked') {
             this.result = data.result;
             // Also load full result
             try {
@@ -56,13 +56,14 @@ document.addEventListener('alpine:init', () => {
     get statusText() {
       if (this.loading) return '⏳ 执行中...';
       if (this.status === 'succeeded') return '✅ 修复成功';
+      if (this.status === 'blocked') return '⚠️ 流程阻断，需人工复核';
       if (this.status === 'failed') return '❌ 修复失败';
       return '⏳ ' + this.progress;
     },
 
     stageClass(n) {
       if (this.stage > n + 1) return 'done';
-      if (this.stage === n + 1) return this.status === 'failed' ? 'failed' : 'active';
+      if (this.stage === n + 1) return (this.status === 'failed' || this.status === 'blocked') ? 'failed' : 'active';
       return '';
     },
 

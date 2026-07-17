@@ -25,10 +25,13 @@ from vuln_agent.models import (
     SourceFile,
     ToolExecutionStatus,
     ValidationLayer,
+    ValidationLayerResult,
+    ValidationToolchainResult,
 )
 from vuln_agent.validation import ValidationToolchain, passed_tool
 from vuln_agent.reporting import RemediationReportAgent
 from vuln_agent.patching import PatchGenerationAgent
+from vuln_agent.quality import assess_patch_quality
 from vuln_agent.remediation import RemediationPlanAgent
 from vuln_agent.models import EngineeringContext
 
@@ -72,6 +75,60 @@ def plan() -> RemediationPlan:
 
 
 class ValidationEvidenceTests(unittest.TestCase):
+    def test_patch_quality_gate_reports_delivery_readiness(self):
+        diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+        validation = ValidationToolchainResult(
+            patch_id="patch-test-001",
+            finding_id="test",
+            status=PatchValidationStatus.PASSED,
+            layers=[
+                ValidationLayerResult(
+                    layer=layer,
+                    status=ToolExecutionStatus.PASSED,
+                    tool_results=[],
+                    summary="passed",
+                )
+                for layer in (
+                    ValidationLayer.BUILD,
+                    ValidationLayer.BUSINESS_REGRESSION,
+                    ValidationLayer.SECURITY_REGRESSION,
+                    ValidationLayer.DIFFERENTIAL_RISK,
+                )
+            ],
+            failures=[],
+            next_action="report",
+            report_ready=True,
+        )
+        metrics = assess_patch_quality(candidate(diff), plan(), validation)
+        self.assertTrue(metrics["quality_gate_passed"])
+        self.assertTrue(metrics["ready_for_automated_delivery"])
+        self.assertEqual(metrics["planned_change_coverage_rate"], 1.0)
+
+    def test_generation_rejects_fuzzy_or_manual_fix_artifacts(self):
+        raw = {
+            "artifacts": [{
+                "patch_type": "code",
+                "target": "app.py",
+                "content": "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-wrong\n+new\n",
+                "needs_manual_fix": True,
+            }]
+        }
+        self.assertFalse(PatchGenerationAgent._has_applicable_artifacts(raw))
+        self.assertFalse(
+            PatchGenerationAgent._verify_diff_applies(
+                raw["artifacts"][0]["content"], "old\n"
+            )
+        )
+
+    def test_executor_rejects_diff_that_requires_fuzzy_application(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("old\n", encoding="utf-8")
+            diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-wrong\n+new\n"
+            result = WorkspaceValidationExecutor(root, {})(candidate(diff))
+            self.assertEqual(result[0].status, ToolExecutionStatus.FAILED)
+            self.assertEqual(result[0].tool_name, "git apply --check")
+
     def test_per_file_fallback_assembles_valid_artifact(self):
         class FakeLLM:
             def reason(self, **kwargs):
@@ -99,6 +156,46 @@ class ValidationEvidenceTests(unittest.TestCase):
             result = ValidationToolchain(executor=executor).validate(candidate(diff), plan(), [])
             self.assertEqual(result.status, PatchValidationStatus.NEEDS_HUMAN_REVIEW)
             self.assertTrue(result.report_ready)
+
+    def test_missing_build_command_does_not_hide_independent_diff_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "requirements.txt").write_text(
+                "Django==5.0.6\n",
+                encoding="utf-8",
+            )
+            diff = (
+                "--- a/requirements.txt\n"
+                "+++ b/requirements.txt\n"
+                "@@ -1 +1 @@\n"
+                "-Django==5.0.6\n"
+                "+Django==5.0.8\n"
+            )
+            dependency_candidate = candidate(diff)
+            dependency_candidate.artifacts[0].patch_type = PatchType.DEPENDENCY
+            dependency_candidate.artifacts[0].target = "requirements.txt"
+            results = WorkspaceValidationExecutor(
+                root,
+                {
+                    "business_regression": (
+                        "python -c \"assert 'Django==5.0.8' in "
+                        "open('requirements.txt').read()\""
+                    )
+                },
+            )(dependency_candidate)
+            by_layer = {item.layer: item for item in results}
+            self.assertEqual(
+                by_layer[ValidationLayer.BUILD].status,
+                ToolExecutionStatus.NOT_CONFIGURED,
+            )
+            self.assertEqual(
+                by_layer[ValidationLayer.BUSINESS_REGRESSION].status,
+                ToolExecutionStatus.PASSED,
+            )
+            self.assertEqual(
+                by_layer[ValidationLayer.DIFFERENTIAL_RISK].status,
+                ToolExecutionStatus.PASSED,
+            )
 
     def test_remediation_plan_does_not_truncate_justified_files(self):
         finding = SimpleNamespace(finding_id="multi-file", locations=[])

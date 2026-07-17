@@ -31,6 +31,8 @@
         <td>
           {% if t.status == 'succeeded' %}
             <span class="badge badge-success">✅ 成功</span>
+          {% elif t.status == 'blocked' %}
+            <span class="badge badge-blocked">⚠️ 阻断</span>
           {% elif t.status == 'failed' %}
             <span class="badge badge-failed">❌ 失败</span>
           {% elif t.status == 'running' %}
@@ -45,7 +47,7 @@
         <td>
           <div class="flex gap-2">
             <a href="/finding/{{ t.task_id }}" class="btn btn-sm btn-secondary">查看</a>
-            {% if t.status == 'succeeded' and t.result and t.result.report_markdown %}
+            {% if t.status in ('succeeded', 'blocked') and t.result %}
             <a href="/api/tasks/{{ t.task_id }}/result" class="btn btn-sm btn-secondary" target="_blank">JSON</a>
             {% endif %}
           </div>

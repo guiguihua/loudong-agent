@@ -145,7 +145,12 @@ class ChatManager:
                 return "📋 暂无运行中的任务。"
             lines = ["### 📋 最近任务\n"]
             for t in recent:
-                icon = "✅" if t.status == "succeeded" else ("❌" if t.status == "failed" else "⏳")
+                icon = (
+                    "✅" if t.status == "succeeded"
+                    else "⚠️" if t.status == "blocked"
+                    else "❌" if t.status == "failed"
+                    else "⏳"
+                )
                 lines.append(f"- {icon} `{t.task_id}` — {t.vuln_type or '未知'} — *{t.progress}*")
             return "\n".join(lines)
         except Exception:

@@ -47,7 +47,11 @@ class WorkspaceValidationExecutor:
             target = Path(tmp) / "workspace"
             self._copy_workspace(target)
             apply_result = self._apply_patch(target, candidate)
-            if apply_result.status != ToolExecutionStatus.PASSED:
+            # A real patch-application/build failure stops downstream checks.
+            # NOT_CONFIGURED means the diff applied but no build command was
+            # discoverable; independent layers (especially diff risk) must
+            # still run and retain their own evidence.
+            if apply_result.status == ToolExecutionStatus.FAILED:
                 return [apply_result, *self._not_run_after_apply_failure()]
 
             results = [apply_result]
@@ -118,24 +122,6 @@ class WorkspaceValidationExecutor:
         patch_file.write_text("\n".join(diffs) + "\n", encoding="utf-8")
         check = self._run(target, "git apply --check ../candidate.patch")
         if check.returncode != 0:
-            # ── LLM 生成的 diff 可能有 hunk 头部不准确 → 尝试修复后重试 ──
-            repaired = self._try_repair_diffs(diffs, target)
-            if repaired:
-                patch_file.write_text("\n".join(repaired) + "\n", encoding="utf-8")
-                check = self._run(target, "git apply --check ../candidate.patch")
-        if check.returncode != 0:
-            # ── git apply 仍失败 → 尝试 Python 宽容应用 ──
-            tolerant_ok = self._try_tolerant_apply(diffs, target)
-            if tolerant_ok:
-                # 宽容应用成功，跳过 git apply 直接进入后续验证
-                return ValidationToolResult(
-                    ValidationLayer.BUILD, "tolerant patch application",
-                    ToolExecutionStatus.PASSED,
-                    "patch applied via tolerant (fuzzy-context) method after git apply failed",
-                    command="git apply --check (failed, fallback to tolerant apply)",
-                    evidence=[f"git apply stderr:\n{check.stderr.strip()}", "Tolerant apply used fuzzy context matching."],
-                    exit_code=0,
-                )
             return self._result(ValidationLayer.BUILD, "git apply --check", check, "candidate diff does not apply")
         apply = self._run(target, "git apply ../candidate.patch")
         if apply.returncode != 0:
@@ -496,6 +482,14 @@ class WorkspaceValidationExecutor:
             # Python repositories and gives real syntax/import-independent evidence.
             if any(target.rglob("*.py")):
                 return [f"{python} -m compileall -q ."]
+            if (target / "pom.xml").exists() and shutil.which("mvn"):
+                return ["mvn -q -DskipTests package"]
+            if (target / "package.json").exists() and shutil.which("npm"):
+                return ["npm run build --if-present"]
+            if (target / "go.mod").exists() and shutil.which("go"):
+                return ["go build ./..."]
+            if (target / "Cargo.toml").exists() and shutil.which("cargo"):
+                return ["cargo check"]
             return []
 
         has_pytest = any((target / name).exists() for name in ("pytest.ini", "pyproject.toml", "tox.ini"))
@@ -503,6 +497,14 @@ class WorkspaceValidationExecutor:
         if layer == ValidationLayer.BUSINESS_REGRESSION:
             if tests_dir.exists() or has_pytest:
                 return [f"{python} -m pytest -q"]
+            if (target / "pom.xml").exists() and shutil.which("mvn"):
+                return ["mvn -q test"]
+            if (target / "package.json").exists() and shutil.which("npm"):
+                return ["npm test"]
+            if (target / "go.mod").exists() and shutil.which("go"):
+                return ["go test ./..."]
+            if (target / "Cargo.toml").exists() and shutil.which("cargo"):
+                return ["cargo test"]
             return []
 
         if layer == ValidationLayer.SECURITY_REGRESSION:
@@ -518,6 +520,14 @@ class WorkspaceValidationExecutor:
             return []
 
         if layer == ValidationLayer.SCANNER_RESCAN:
+            if shutil.which("osv-scanner") and any(
+                (target / name).exists()
+                for name in (
+                    "requirements.txt", "pyproject.toml", "package.json",
+                    "pom.xml", "go.mod", "Cargo.toml",
+                )
+            ):
+                return ["osv-scanner --recursive ."]
             semgrep_config = next(
                 (name for name in (".semgrep.yml", ".semgrep.yaml", "semgrep.yml", "semgrep.yaml") if (target / name).exists()),
                 None,

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import tokenize
 from collections import OrderedDict
 from dataclasses import asdict
@@ -481,6 +482,20 @@ class EvidenceCollector:
             tests.append("cargo test")
 
         scanner: list[str] = []
+        dependency_manifests = basenames.intersection({
+            "requirements.txt", "pyproject.toml", "package.json", "pom.xml",
+            "go.mod", "cargo.toml",
+        })
+        if finding.dependency and dependency_manifests:
+            if shutil.which("osv-scanner"):
+                detected.append("osv-scanner")
+                scanner.append("osv-scanner --recursive .")
+            elif (
+                dependency_manifests.intersection({"requirements.txt", "pyproject.toml"})
+                and shutil.which("pip-audit")
+            ):
+                detected.append("pip-audit")
+                scanner.append("pip-audit")
         if basenames.intersection({".semgrep.yml", ".semgrep.yaml", "semgrep.yml", "semgrep.yaml"}):
             detected.append("semgrep")
             scanner.append("semgrep scan --config auto .")

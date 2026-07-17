@@ -46,7 +46,7 @@ body {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--shadow);
 }
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
 .stat-card { text-align: center; }
 .stat-card .stat-value { font-size: 2rem; font-weight: 700; color: var(--accent2); }
 .stat-card .stat-label { font-size: .8rem; color: var(--text2); margin-top: .25rem; }
@@ -130,6 +130,7 @@ tr:hover { background: var(--surface2); }
 .badge-low { background: #1e3a5f; color: #93c5fd; }
 .badge-critical { background: #4c0519; color: #fda4af; }
 .badge-success { background: #14532d; color: #86efac; }
+.badge-blocked { background: #713f12; color: #fde68a; }
 .badge-failed { background: #7f1d1d; color: #fca5a5; }
 
 /* ── Tabs ── */

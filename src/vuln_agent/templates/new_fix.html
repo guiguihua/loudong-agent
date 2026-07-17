@@ -220,7 +220,7 @@
         <strong x-text="statusText"></strong>
         <span class="text-muted" x-text="progress" style="margin-left:.75rem;"></span>
       </div>
-      <a :href="'/finding/' + taskId" class="btn btn-sm btn-secondary" x-show="status === 'succeeded' || status === 'failed'">查看详情</a>
+      <a :href="'/finding/' + taskId" class="btn btn-sm btn-secondary" x-show="status === 'succeeded' || status === 'blocked' || status === 'failed'">查看详情</a>
     </div>
     <div class="progress-steps">
       <template x-for="n in 6" :key="n">
@@ -279,6 +279,7 @@ document.addEventListener('alpine:init', () => {
     get statusText() {
       if (this.submitting && !this.status) return '提交中';
       if (this.status === 'succeeded') return '任务完成';
+      if (this.status === 'blocked') return '流程阻断，需人工复核';
       if (this.status === 'failed') return '任务失败';
       if (this.status === 'running') return '执行中';
       return '';
@@ -286,7 +287,7 @@ document.addEventListener('alpine:init', () => {
 
     stageClass(n) {
       if (this.stage > n) return 'done';
-      if (this.stage === n) return this.status === 'failed' ? 'failed' : 'active';
+      if (this.stage === n) return (this.status === 'failed' || this.status === 'blocked') ? 'failed' : 'active';
       return '';
     },
 
@@ -416,7 +417,7 @@ document.addEventListener('alpine:init', () => {
       this.status = data.status;
       this.progress = data.progress || '';
       this.stage = data.stage || 0;
-      if (data.status === 'succeeded' || data.status === 'failed') {
+      if (data.status === 'succeeded' || data.status === 'blocked' || data.status === 'failed') {
         this.submitting = false;
         if (this.pollTimer) clearInterval(this.pollTimer);
       }

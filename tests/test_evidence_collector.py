@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from vuln_agent.evidence import EvidenceCollector, format_evidence_bundle
 from vuln_agent.models import EngineeringContext, RepositoryContext, SourceFile
@@ -89,6 +90,32 @@ class EvidenceCollectorTests(unittest.TestCase):
         self.assertTrue(any(item.path == "package.json" for item in bundle.dependency_evidence))
         self.assertIn("npm test", bundle.validation_capabilities.test_commands)
         self.assertIn("package.json", bundle.repository_summary.manifests)
+
+    def test_dependency_scanner_is_required_only_when_executable_is_available(self):
+        dep_finding = finding(
+            vulnerability_type="dependency",
+            affected_file="requirements.txt",
+            component="django",
+            current_version="5.0.6",
+            fixed_versions=["5.0.8"],
+        )
+        with patch(
+            "vuln_agent.evidence.shutil.which",
+            side_effect=lambda name: "C:/tools/osv-scanner.exe"
+            if name == "osv-scanner" else None,
+        ):
+            bundle = EvidenceCollector().collect(
+                dep_finding,
+                [SourceFile("requirements.txt", "Django==5.0.6\n")],
+            )
+        self.assertIn(
+            "osv-scanner --recursive .",
+            bundle.validation_capabilities.scanner_commands,
+        )
+        self.assertIn(
+            "osv-scanner",
+            bundle.validation_capabilities.detected_tools,
+        )
 
     def test_environment_values_are_never_exposed(self):
         secret = "super-secret-value"

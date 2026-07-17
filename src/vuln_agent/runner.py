@@ -31,8 +31,10 @@ from .models import (
 from .normalization import VulnerabilityNormalizer
 from .orchestration import PatchRepairLoopOrchestrator
 from .patching import PatchGenerationAgent
+from .quality import assess_patch_quality
 from .remediation import RemediationPlanAgent
 from .reporting import RemediationReportAgent
+from .routing import RepairTaskClassifier
 from .root_cause import RootCauseAnalysisAgent
 from .tools import (
     AssetContext,
@@ -147,6 +149,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     sources = _build_source_files(raw, source_files_data, overrides)
     tool_results = _build_validation_results(raw, overrides)
     evidence_bundle = EvidenceCollector().collect(finding, sources, repo, eng)
+    repair_route = RepairTaskClassifier().route(finding, evidence_bundle)
 
     # ── 构建 Agent ──
     code_ctx = _build_code_context(finding, raw, overrides)
@@ -198,8 +201,12 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         patch_generation_agent=PatchGenerationAgent(
             PatchGenerationPolicy(), llm=llm, workspace=workspace,
             pipeline_mode=run_mode,
+            repair_route=repair_route,
         ),
-        validation_toolchain=ValidationToolchain(executor=validation_executor),
+        validation_toolchain=ValidationToolchain(
+            required_layers=repair_route.verification_profile.required_layers,
+            executor=validation_executor,
+        ),
         failure_analysis_agent=FailureAnalysisAgent(
             llm=llm, workspace=workspace, pipeline_mode=run_mode,
         ),
@@ -219,6 +226,7 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         "impact": impact.to_dict(),
         "root_cause": root_cause_result.to_dict(),
         "evidence_bundle": evidence_bundle.to_dict(),
+        "repair_route": repair_route.to_dict(),
         "status": result.status.value,
         "run_mode": run_mode,
         "reasoning_trace": {
@@ -238,6 +246,11 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
         attempt = result.attempts[-1]
         output["patch_candidate"] = attempt.patch_candidate.to_dict()
         output["patch_validation"] = attempt.validation.to_dict()
+        output["patch_quality"] = assess_patch_quality(
+            attempt.patch_candidate,
+            attempt.remediation_plan,
+            attempt.validation,
+        )
 
     if result.final_failure_analysis is not None:
         output["failure_analysis"] = result.final_failure_analysis.to_dict()

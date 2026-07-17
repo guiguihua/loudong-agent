@@ -33,12 +33,16 @@
       │   策略: code_change / dependency_upgrade / configuration_change
       │   路径门禁：确定性将 LLM 文本路径解析为唯一仓库文件
       │
-      ▼ PatchGenerationAgent（ReAct Agent + DeepSeek LLM）
-      │   推理：Plan-and-Execute + 逐文件合成 (Per-File Artifact)
-      │   输出: Unified Diff 格式补丁 (不写入原始仓库)
+      ▼ RepairTaskClassifier（确定性能力路由 + 证据资格门禁 + VerificationProfile）
       │
-      ▼ ValidationToolchain（隔离工作区 5 层验证）
-      │   Build → Business Regression → Security Regression → Scanner Rescan → Diff Risk
+      ▼ PatchGenerationAgent / 专业 Repair Executor
+      │   SQL/命令注入/路径穿越：AST ChangeSet → 隔离 Git 工作区
+      │   → 结构化符号编辑 → 聚焦测试 → Git 生成 Unified Diff
+      │   依赖漏洞：SCA ChangeSet → 精确修改 manifest → 版本/语法/锁文件门禁
+      │   未接入专业执行器或证据不足：blocked，不进入通用补丁合成
+      │
+      ▼ ValidationToolchain（按漏洞类型选择 mandatory 验证层）
+      │   Exact Apply / Build / Attack / Legitimate / Scanner / Diff Risk
       │
   ┌───┴───┐
   通过    失败
@@ -147,8 +151,23 @@
 - 失败反馈融合：根据上次 FailureAnalysis 的结果调整方案
 
 #### PatchGenerationAgent (`patching.py`)
-- 继承 BaseAgent，生成 Unified Diff 格式候选补丁
-- **逐文件合成** (Per-File Artifact)：多文件修改时按文件逐个生成，避免大响应截断
+- 继承 BaseAgent，作为补丁执行入口和候选数据适配层
+- SQL 注入、命令注入、路径穿越路由到 `SASTCodeRepairExecutor`
+- `PythonSemanticContextBuilder` 使用 AST 获取完整目标函数、定义和直接引用，不截断目标符号
+- 先创建隔离 Git 工作区并锁定文件哈希，再让 LLM 输出结构化符号编辑
+- 编辑由工具按 AST 边界执行；LLM 不负责 unified diff hunk 行号
+- 修改后立即执行语法检查、漏洞家族安全 Oracle 和聚焦测试
+- 最终 Unified Diff 由 Git 生成，并再次使用 `git apply --check` 精确验证
+- 依赖漏洞路由到 `SCADependencyRepairExecutor`，不再交给普通代码 PatchAgent
+- SCA 执行器支持 requirements/pyproject/package.json/pom/go.mod/Cargo.toml，
+  只选择报告给出的修复版本
+- 只自动修改 manifest 中能够确认的直接依赖；仅存在于 lockfile 的传递依赖要求补充父依赖证据
+- npm/pnpm/yarn/uv/PDM/Pipenv/Cargo/Go 锁文件只允许通过包管理器离线重建，
+  并重新检查语法、目标解析版本和 Git diff；工具或离线缓存不足时直接阻断
+- `breaking_upgrade=false` 时要求存在同主版本修复；跨主版本或明确破坏性升级必须通过
+  mandatory build 与 consumer regression
+- 未接入专业执行器的漏洞类型由 `RepairTaskClassifier` 标记为
+  `automation_eligible=false`，不会再静默落入通用补丁生成
 - 静态结构预检 (`PatchValidationAgent`)：
   - 验证 unified diff 头完整性（`---` / `+++` / `@@`）
   - 验证所有 planned_changes 都有对应 artifact
@@ -188,13 +207,13 @@
 - **Source 模式识别**：请求对象访问点（request.args, req.query 等）+ JWT/认证参数
 - **代码切片**：有界上下文窗口（默认 80 行半径）+ 字符预算（默认 50KB）
 - **敏感信息脱敏**：密钥行 / Bearer Token / AWS AKIA 自动 `<redacted>`
-- **测试/验证能力自动发现**：检测 pytest/maven/go/cargo/semgrep 配置
+- **测试/验证能力自动发现**：检测 pytest/maven/go/cargo/semgrep/OSV-Scanner/pip-audit 能力
 - **缓存机制**：LRU 缓存（默认 64 条目），相同输入复用
 - **格式化输出**：`format_evidence_bundle()` 限长输出适配 Agent prompt
 
 ### 7. 验证工具链 (`validation.py`)
 
-**ValidationToolchain** — 5 层隔离工作区验证：
+**ValidationToolchain** — 按 `VerificationProfile` 选择 mandatory 层的隔离工作区验证：
 
 ```
 静态预检 (PatchValidationAgent)
@@ -528,7 +547,7 @@ DEEPSEEK_MODEL=deepseek-chat
 ## 运行测试
 
 ```bash
-python -m unittest discover -s tests -v    # 全部测试（约 28+ 个）
+python -m pytest tests -q -p no:cacheprovider  # 仅运行本项目测试；排除 validation-coverage 上游快照
 python -m vuln_agent evaluate              # Agent 评估流程
 ```
 
@@ -555,6 +574,12 @@ loudong-agent/
 │   ├── normalization.py     # VulnerabilityNormalizer 标准化
 │   ├── orchestration.py     # PatchRepairLoopOrchestrator 流水线编排
 │   ├── patching.py          # PatchGenerationAgent + PatchValidationAgent
+│   ├── semantic.py          # Python AST 语义上下文 + ChangeSet
+│   ├── sast_executor.py     # SQL/命令注入/路径穿越隔离工作区执行器
+│   ├── sca_executor.py      # 多生态依赖声明升级与锁文件一致性门禁
+│   ├── routing.py           # 漏洞家族、执行器和 VerificationProfile 路由
+│   ├── quality.py           # 单任务补丁质量门禁
+│   ├── baseline.py          # Verified Patch Rate 与发布门禁
 │   ├── reasoning.py         # PipelineMode / ReasoningMode / StagePolicy
 │   ├── remediation.py       # RemediationPlanAgent (Plan-and-Solve + Ranking)
 │   ├── reporting.py         # RemediationReportAgent (双格式报告)
