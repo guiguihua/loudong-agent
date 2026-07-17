@@ -5,7 +5,7 @@
   GET  /new                      新建修复任务页面
   GET  /finding/{id}             漏洞详情/结果
   GET  /chat                     聊天页面
-  GET  /repo                     仓库浏览器
+  GET  /repo                     代码仓库管理
   GET  /history                  历史记录
   GET  /health                   健康检查
   POST /v1/findings/analyze      分析（标准化 + 影响面 + 根因）
@@ -36,7 +36,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 
-from .config import config_status, load_env_file
+from .config import AVAILABLE_LLM_MODELS, config_status, load_env_file
 from .normalization import VulnerabilityNormalizer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,7 +69,7 @@ load_env_file()
 # ── Jinja2 模板引擎 ──
 
 def _has_llm() -> bool:
-    return bool(os.environ.get("DEEPSEEK_API_KEY"))
+    return bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GLM_API_KEY"))
 
 
 _jinja_env = Environment(
@@ -77,6 +77,8 @@ _jinja_env = Environment(
     auto_reload=True,
 )
 _jinja_env.globals["has_llm"] = _has_llm()
+_jinja_env.globals["available_llm_models"] = list(AVAILABLE_LLM_MODELS)
+_jinja_env.globals["default_llm_model"] = os.environ.get("LLM_MODEL") or os.environ.get("DEEPSEEK_MODEL") or AVAILABLE_LLM_MODELS[0]
 
 
 def render_template(name: str, **context: Any) -> HTMLResponse:
@@ -124,20 +126,23 @@ def create_app() -> FastAPI:
         return config_status()
 
     # ── 已有 API ──
+    from .llm import create_llm_backend
     from .impact import ImpactAnalysisAgent
     from .tools import StaticAssetInventoryTool, StaticCodeContextTool, StaticRuntimeEvidenceTool
     from .root_cause import RootCauseAnalysisAgent
     from .tools import StaticRootCauseEvidenceTool
     from .service import IntakeImpactService
 
+    _llm = create_llm_backend()
     analyze_service = IntakeImpactService(
         normalizer=VulnerabilityNormalizer(),
         impact_agent=ImpactAnalysisAgent(
             code_tool=StaticCodeContextTool({}),
             asset_tool=StaticAssetInventoryTool({}),
             runtime_tool=StaticRuntimeEvidenceTool({}),
+            llm=_llm,
         ),
-        root_cause_agent=RootCauseAnalysisAgent(StaticRootCauseEvidenceTool()),
+        root_cause_agent=RootCauseAnalysisAgent(StaticRootCauseEvidenceTool(), llm=_llm),
     )
 
     @app.post("/v1/findings/analyze")
@@ -612,6 +617,14 @@ def _pipeline_mode(body: dict[str, Any]) -> str:
     return mode
 
 
+def _selected_llm_model(body: dict[str, Any]) -> str | None:
+    """Return a safe task-scoped LLM model selection."""
+    model = str(body.get("llm_model") or body.get("model") or "").strip()
+    if not model:
+        return None
+    return model if model in AVAILABLE_LLM_MODELS else None
+
+
 def _as_flat_source_dict(value: object) -> dict[str, str] | None:
     """Normalize source_files to dict[str, str] for WorkspaceValidationExecutor.
 
@@ -855,8 +868,8 @@ def _fallback_remediation_plan(finding, impact, root_cause, engineering, exc: Ex
         patch_boundaries=PatchBoundaries(
             allowed_files=target_files,
             forbidden_changes=["do not weaken authentication, authorization, validation, or cryptographic checks"],
-            maximum_changed_files=5,
-            maximum_diff_lines=250,
+            maximum_changed_files=max(len(target_files) + 3, 8),
+            maximum_diff_lines=500,
         ),
         assumptions=[],
         unknowns=[reason],
@@ -881,11 +894,14 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
 
         # LLM 后端
         from .llm import create_llm_backend
-        llm = create_llm_backend()
+        selected_model = _selected_llm_model(body)
+        llm = create_llm_backend(model=selected_model)
         if not llm:
             raise RuntimeError(
-                "未设置 DEEPSEEK_API_KEY 环境变量。\n"
-                "请设置: $env:DEEPSEEK_API_KEY = 'sk-...'"
+                "未设置 LLM API Key。请至少配置一个 provider：\n"
+                "  DeepSeek: DEEPSEEK_API_KEY=sk-...\n"
+                "  GLM(智谱): GLM_API_KEY=...\n"
+                "模型选择通过 llm_model 参数或 LLM_MODEL 环境变量指定。"
             )
         print(f"[Agent] 使用 {llm.model} 进行推理")
         if task_info:
@@ -1067,6 +1083,7 @@ def _run_pipeline_sync(task_id: str, body: dict[str, Any]) -> None:
             "evidence_bundle": evidence_bundle.to_dict(),
             "status": result.status.value,
             "run_mode": run_mode,
+            "llm_model": llm.model,
             "repository_context": body.get("repository_context"),
             "reasoning_trace": {
                 "impact": impact_agent.last_execution.to_dict(),

@@ -69,6 +69,7 @@ class WorkspaceValidationExecutor:
             artifact.content for artifact in candidate.artifacts
             if artifact.patch_type in {PatchType.CODE, PatchType.TEST, PatchType.CONFIGURATION, PatchType.DEPENDENCY}
             and "--- " in artifact.content and "+++ " in artifact.content
+            and not getattr(artifact, "needs_manual_fix", False)  # skip best-effort placeholders
         ]
         if not diffs:
             return ValidationToolResult(

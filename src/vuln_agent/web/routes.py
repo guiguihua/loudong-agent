@@ -51,7 +51,7 @@ async def chat_page(request: Request):
 
 @router.get("/repo")
 async def repo_list(request: Request):
-    """仓库浏览器。"""
+    """代码仓库管理。"""
     try:
         from .git_handler import git_handler
         repos = git_handler.list_repos()

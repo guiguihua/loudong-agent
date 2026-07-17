@@ -88,5 +88,26 @@
       "dependency_index_ready": false,
       "semantic_index_ready": false
     }
+  },
+  "6d440c27c830": {
+    "id": "6d440c27c830",
+    "name": "app-demo",
+    "provider": "github",
+    "url": "https://github.com/guiguihua/app-demo",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\.data\\repos\\6d440c27c830",
+    "default_branch": "main",
+    "auth_mode": "none",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "d0fe3e091493",
+      "last_indexed_at": "2026-07-15 10:06",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
   }
 }

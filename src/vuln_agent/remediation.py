@@ -72,7 +72,13 @@ REMEDIATION_AGENT_PROMPT = """你是一位资深安全修复工程师，负责�
 - 修复决策只能依据当前漏洞报告、当前源码、配置、依赖和测试证据；不得依赖尚不存在的上游/官方补丁，也不得照搬外部参考实现。
 - 如果评测数据中附带官方修复或参考答案，它们只允许在流水线完成后的离线评分阶段使用，不能进入修复规划或补丁生成上下文。
 - 文件数和 diff 行数只用于风险分级和人工审查提示，不作为自动截断或拒绝修复的硬阈值。
-- 不得把“可能更安全”当成扩大范围的充分理由；每项变更都要有可追溯证据，同时保证补丁可审查、可回滚、可验证。
+- 不得把”可能更安全”当成扩大范围的充分理由；每项变更都要有可追溯证据，同时保证补丁可审查、可回滚、可验证。
+- causally_required: 根因 source→sink 因果链直接命中的文件必须标记 causally_required=true。这些文件是漏洞可达路径上的硬约束——遗漏任何一个都会导致漏洞在对应调用路径中仍然可达。非因果链上的辅助文件（如测试、日志、格式调整）标记为 false。标记为 true 的文件如果最终补丁未覆盖，会被 validation 直接拒绝。
+- forbidden_changes（patch_boundaries 中的禁止变更清单）必须是具体的、可验证的约束，而非泛泛的"不要破坏安全"。违反 forbidden_changes 的补丁会在 validation 被拒绝。禁止变更应聚焦"修复层级"而非"不要引入 bug"：
+  - 禁止在通用 key import 层添加防御 → 防御放在算法专属入口（如 HMACAlgorithm.prepare_key）
+  - 禁止删除已有算法注册 → 通过 algorithms 白名单控制可用算法
+  - 禁止删除现有功能路径 → 通过 alg 白名单和 alg-key 类型绑定防御
+  - 禁止破坏现有测试语义 → 补丁必须向后兼容
 
 确认分析完成后，调用 submit_final_result 工具提交最终结果。"""
 
@@ -1137,11 +1143,21 @@ planned_changes.file 必须是 EvidenceBundle/当前仓库中唯一存在的单�
             patch_boundaries=PatchBoundaries(
                 allowed_files=[change.file for change in planned_changes],
                 forbidden_changes=[
-                    "do not weaken authentication, authorization, validation, or cryptographic checks",
-                    "do not remove failing tests to make validation pass",
+                    # ── 最小修复边界（违反这些规则的补丁会在 validation 被拒绝）──
+                    "最小修复边界: 不得在通用 key import 层添加防御（如 OctKey.import_key 拒绝 PEM）"
+                    " — 防御必须放在算法专属入口（如 HMACAlgorithm.prepare_key），"
+                    " 保持底层导入函数的通用契约不变",
+                    "最小修复边界: 不得删除已有算法注册（如 NoneAlgorithm from JWS_ALGORITHMS）"
+                    " — 应通过 algorithms 白名单控制可用算法，保留库的标准兼容能力",
+                    "最小修复边界: 不得删除现有功能路径（如 JWS header jwk key 解析分支）"
+                    " — 算法混淆防御应通过 alg 白名单和 alg-key 类型绑定实现",
+                    "最小修复边界: 不得破坏现有测试语义 — 已有测试（如 test_compact_none）"
+                    " 必须继续通过，补丁必须向后兼容",
+                    "修复层级约束: 安全防御放在算法调度层（alg-key 兼容性校验）和"
+                    " 算法专属入口（HMAC.prepare_key），不改通用导入层和算法注册表",
                 ],
-                maximum_changed_files=5,
-                maximum_diff_lines=250,
+                maximum_changed_files=max(len(planned_changes) + 3, 8),
+                maximum_diff_lines=500,
             ),
             assumptions=["static_remediation_plan_from_template"],
             unknowns=[],
@@ -1179,6 +1195,7 @@ planned_changes.file 必须是 EvidenceBundle/当前仓库中唯一存在的单�
                 description=str(pc.get("description") or pc.get("summary") or "Apply required remediation change."),
                 reason=str(pc.get("reason") or pc.get("rationale") or raw.get("remediation_goal", "")),
                 risk_level=RemediationPlanAgent._normalize_severity(pc.get("risk_level", "medium")),
+                causally_required=bool(pc.get("causally_required", False)),
             )
             for pc in raw.get("planned_changes", [])
             if isinstance(pc, dict)
@@ -1219,7 +1236,12 @@ planned_changes.file 必须是 EvidenceBundle/当前仓库中唯一存在的单�
         default_diff_budget = max(250, 150 * max(1, len(planned_changes)))
         boundaries = PatchBoundaries(
             allowed_files=[pc.file for pc in planned_changes],
-            forbidden_changes=["不得绕过或削弱现有安全校验", "不得删除失败测试"],
+            forbidden_changes=[
+                "不得在通用 key import 层添加防御 — 防御放在算法专属入口",
+                "不得删除已有算法注册 — 通过 algorithms 白名单控制",
+                "不得删除现有功能路径 — 通过 alg 白名单和类型绑定防御",
+                "不得破坏现有测试语义 — 补丁必须向后兼容",
+            ],
             maximum_changed_files=max(
                 len(planned_changes), int(boundary_data.get("maximum_changed_files", len(planned_changes) or 1))
             ),

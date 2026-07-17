@@ -468,6 +468,27 @@ class ImportVerificationTests(unittest.TestCase):
             self.assertNotIn("InvalidKeyError", issue,
                              f"Should not check imports without source_files: {issue}")
 
+    def test_diff_quality_report_blocks_markdown_identifier_corruption(self):
+        """Markdown emphasis must not be allowed to corrupt Python identifiers."""
+        diff = (
+            "--- a/authlib/oauth2/rfc7523/validator.py\n"
+            "+++ b/authlib/oauth2/rfc7523/validator.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " class JWTBearerTokenValidator:\n"
+            "-    def __init__(self, public_key):\n"
+            "+    def **init**(self, public_key, algorithms=None):\n"
+            "+        self.algorithms = algorithms\n"
+        )
+        report = PatchGenerationAgent._diff_quality_report(
+            diff,
+            "class JWTBearerTokenValidator:\n    def __init__(self, public_key):\n        pass\n",
+            "authlib/oauth2/rfc7523/validator.py",
+        )
+        self.assertTrue(
+            any("Markdown" in issue or "**init**" in issue for issue in report["issues"]),
+            f"Expected Markdown identifier corruption to be blocking, got: {report}",
+        )
+
     def test_verify_diff_imports_stdlib_skipped(self):
         """Imports from stdlib (like 'import os') should not be flagged."""
         diff = (

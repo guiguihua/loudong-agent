@@ -4,6 +4,8 @@
 
 <h1 class="page-title">新建漏洞修复任务</h1>
 <p class="page-subtitle">选择已绑定代码仓库，输入或上传漏洞报告，Agent 将基于仓库上下文完成定位、分析、建议、补丁草案和验证。</p>
+{% set model_options = available_llm_models|default(['glm-5.2', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'], true) %}
+{% set selected_llm_model = model_options[0] %}
 
 <div x-data="newFixApp" x-init="init()">
   <form id="fix-form" @submit.prevent="submitTask">
@@ -178,14 +180,26 @@
 
     <div class="card mb-2">
       <div class="section-heading"><span>3. 执行选项</span></div>
-      <div class="policy-grid">
-        <label>运行模式
+      <div class="form-row">
+        <div class="form-group">
+          <label>底层大模型</label>
+          <select name="llm_model" x-model="llmModel" :disabled="!llm">
+            {% for model in model_options %}
+            <option value="{{ model }}">{{ model }}</option>
+            {% endfor %}
+          </select>
+          <p class="text-muted mt-1">选择本次修复任务使用的模型，点击“启动分析任务”后生效。</p>
+        </div>
+        <div class="form-group">
+          <label>运行模式</label>
           <select name="run_mode" x-model="runMode">
             <option value="balanced">balanced（推荐）</option>
             <option value="fast">fast（快速审查）</option>
             <option value="deep">deep（复杂高危）</option>
           </select>
-        </label>
+        </div>
+      </div>
+      <div class="policy-grid">
         <label><input type="checkbox" name="use_llm" value="1" x-model="llm"> 启用 LLM 推理</label>
       </div>
     </div>
@@ -231,6 +245,7 @@ document.addEventListener('alpine:init', () => {
     rawReport: '',
     runMode: 'balanced',
     llm: {{ 'true' if has_llm else 'false' }},
+    llmModel: 'glm-5.2',
     submitting: false,
     taskId: null,
     status: '',
@@ -357,6 +372,7 @@ document.addEventListener('alpine:init', () => {
         payload.raw_report = this.rawReport || payload.raw_report || '';
         payload.run_mode = this.runMode || payload.run_mode || 'balanced';
         payload.use_llm = !!this.llm;
+        payload.llm_model = this.llmModel || payload.llm_model || '';
 
         const hidden = document.getElementById('source-files-hidden');
         hidden.querySelectorAll('input[type=hidden]').forEach(inp => {

@@ -44,7 +44,7 @@ class ValidationToolchain:
         fatal_checks = {f.check for f in precheck_failures}
         fatal_blockers = {
             "candidate_generated", "patch_boundary_policy", "test_api_contract",
-            "security_regression_test",
+            "security_regression_test", "planned_change_artifacts",
         }
         has_fatal = bool(fatal_checks & fatal_blockers)
         if has_fatal:

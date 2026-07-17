@@ -322,6 +322,7 @@ class PlannedChange:
     description: str
     reason: str
     risk_level: Severity = Severity.MEDIUM
+    causally_required: bool = False  # True: 因果必需文件，补丁不可遗漏
 
 
 @dataclass(slots=True)
@@ -559,6 +560,8 @@ class PatchArtifact:
     target: str
     content: str
     description: str
+    needs_manual_fix: bool = False
+    fix_reason: str = ""
 
 
 @dataclass(slots=True)

@@ -6,7 +6,8 @@
 环境变量:
     DEEPSEEK_API_KEY  — DeepSeek API Key（必需）
     DEEPSEEK_BASE_URL — 自定义 API 地址（可选，默认 https://api.deepseek.com）
-    DEEPSEEK_MODEL    — 模型名（可选，默认 deepseek-chat）
+    LLM_MODEL         — 默认模型名（可选，优先于 DEEPSEEK_MODEL）
+    DEEPSEEK_MODEL    — [向后兼容] 默认模型名
 """
 
 from __future__ import annotations
@@ -398,6 +399,7 @@ REMEDIATION_PLAN_SCHEMA = {
                     "description": {"type": "string"},
                     "reason": {"type": "string"},
                     "risk_level": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "causally_required": {"type": "boolean", "description": "此文件是否被根因因果链直接命中，遗漏会导致漏洞仍然可达。source→sink 路径上的文件必须设为 true。"},
                 },
                 "required": ["file", "change_type", "description", "reason"],
             },
@@ -447,10 +449,46 @@ REMEDIATION_PLAN_SCHEMA = {
 }
 
 
-# ── LLM Backend (DeepSeek via OpenAI SDK) ─────────────────────────────
+# ── LLM Backend (multi-provider via OpenAI SDK) ────────────────────────
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
+
+
+def _get_default_model() -> str:
+    """读取默认模型：LLM_MODEL > DEEPSEEK_MODEL（向后兼容）> DEFAULT_MODEL。"""
+    return os.environ.get("LLM_MODEL") or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
+
+
+# Provider configs — model name prefix determines provider
+_PROVIDER_CONFIG: dict[str, dict[str, str]] = {
+    "glm": {
+        "api_key_env": "GLM_API_KEY",
+        "base_url_env": "GLM_BASE_URL",
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4/",
+    },
+    "deepseek": {
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "default_base_url": "https://api.deepseek.com",
+    },
+}
+
+
+def _detect_provider(model: str) -> str:
+    """Detect provider from model name. Returns 'deepseek' or 'glm'."""
+    model_lower = model.lower()
+    if "glm" in model_lower:
+        return "glm"
+    return "deepseek"
+
+
+def _provider_credentials(model: str) -> tuple[str, str]:
+    """Return (api_key, base_url) for the given model's provider."""
+    provider = _detect_provider(model)
+    cfg = _PROVIDER_CONFIG[provider]
+    api_key = os.environ.get(cfg["api_key_env"], "")
+    base_url = os.environ.get(cfg["base_url_env"], "") or cfg["default_base_url"]
+    return api_key, base_url
 
 
 # ── ChatResponse ────────────────────────────────────────────────────────
@@ -466,33 +504,39 @@ class ChatResponse:
 
 @dataclass(slots=True)
 class LLMBackend:
-    """封装 DeepSeek API 调用（兼容 OpenAI SDK）。
+    """多 provider LLM 后端（兼容 OpenAI SDK）。
+
+    根据 model 名自动选择 provider：
+      - glm-5.2           → 智谱 GLM  API
+      - deepseek-v4-pro   → DeepSeek API
+      - deepseek-chat     → DeepSeek API
+      - deepseek-reasoner → DeepSeek API
 
     Usage:
-        llm = LLMBackend()                                # 从环境变量读 DEEPSEEK_API_KEY
-        llm = LLMBackend(model="deepseek-chat")           # 指定模型
-        llm = LLMBackend(api_key="sk-...", model="...")   # 显式传参
-
-        result = llm.reason("分析这个SQL注入漏洞的影响面...",
-                            output_schema=IMPACT_SCHEMA)
+        llm = LLMBackend()                       # 从环境变量读
+        llm = LLMBackend(model="glm-5.2")        # 指定模型
+        llm = LLMBackend(model="deepseek-chat")  # 自动切到 DeepSeek
     """
 
     model: str = DEFAULT_MODEL
-    api_key: str | None = field(default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY"))
-    base_url: str = DEFAULT_BASE_URL
+    api_key: str | None = None
+    base_url: str = ""
     max_tokens: int = 16384
     request_timeout_seconds: float = 120.0
 
     def __post_init__(self):
-        # 允许通过环境变量覆盖 base_url 和 model
-        if not self.api_key:
-            self.api_key = os.environ.get("DEEPSEEK_API_KEY")
-        env_base = os.environ.get("DEEPSEEK_BASE_URL")
-        if env_base:
-            self.base_url = env_base
-        env_model = os.environ.get("DEEPSEEK_MODEL")
-        if env_model:
+        # 环境变量兜底 model（LLM_MODEL 优先，DEEPSEEK_MODEL 向后兼容）
+        env_model = _get_default_model()
+        if env_model and self.model == DEFAULT_MODEL:
             self.model = env_model
+
+        # 根据 model 自动选择 provider 的 api_key / base_url
+        key, url = _provider_credentials(self.model)
+        if not self.api_key:
+            self.api_key = key
+        if not self.base_url:
+            self.base_url = url
+
         env_timeout = os.environ.get("DEEPSEEK_TIMEOUT_SECONDS")
         if env_timeout:
             self.request_timeout_seconds = float(env_timeout)
@@ -760,15 +804,19 @@ class LLMBackend:
 # ── 便捷函数 ──────────────────────────────────────────────────────────
 
 def create_llm_backend(model: str | None = None) -> LLMBackend | None:
-    """如果 DEEPSEEK_API_KEY 已设置，返回 LLMBackend；否则返回 None。
+    """如果任一 provider 的 API Key 已设置，返回 LLMBackend；否则返回 None。
+
+    根据 model 名自动选择 provider：
+      - glm-5.2           → GLM_API_KEY + GLM_BASE_URL
+      - deepseek-*        → DEEPSEEK_API_KEY + DEEPSEEK_BASE_URL
 
     用法:
         llm = create_llm_backend()
+        llm = create_llm_backend(model="glm-5.2")
         agent = ImpactAnalysisAgent(..., llm=llm)
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+    selected_model = model or _get_default_model()
+    key, _ = _provider_credentials(selected_model)
+    if not key:
         return None
-    return LLMBackend(
-        model=model or os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL),
-    )
+    return LLMBackend(model=selected_model)

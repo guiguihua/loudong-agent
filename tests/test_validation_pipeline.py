@@ -145,6 +145,63 @@ class ValidationEvidenceTests(unittest.TestCase):
         self.assertEqual(result.status, PatchValidationStatus.NEEDS_HUMAN_REVIEW)
         self.assertTrue(result.report_ready)
 
+    def test_missing_strategy_critical_planned_artifact_is_fatal_precheck(self):
+        remediation = plan()
+        remediation.remediation_goal = "three-layer JWT algorithm/key confusion defense"
+        remediation.planned_changes = [
+            PlannedChange(
+                "authlib/jose/rfc7515/jws.py", "code",
+                "central JWS algorithm allowlist and key compatibility validation",
+                "core control for CVE algorithm confusion",
+                Severity.HIGH,
+            ),
+            PlannedChange(
+                "authlib/jose/rfc7519/jwt.py", "code",
+                "JWT decode trust boundary must enforce the selected algorithm strategy",
+                "central decoder guard for token verification",
+                Severity.HIGH,
+            ),
+            PlannedChange(
+                "authlib/jose/rfc7518/jws_algs.py", "code",
+                "reject asymmetric public keys as HMAC secrets",
+                "algorithm/key compatibility check",
+                Severity.HIGH,
+            ),
+        ]
+        remediation.patch_boundaries = PatchBoundaries(
+            [change.file for change in remediation.planned_changes], [], 3, 150,
+        )
+        partial = PatchCandidate(
+            patch_id="patch-partial",
+            finding_id="test",
+            status=PatchCandidateStatus.GENERATED,
+            summary="partial fix",
+            artifacts=[PatchArtifact(
+                PatchType.CODE,
+                "authlib/jose/rfc7518/jws_algs.py",
+                "--- a/authlib/jose/rfc7518/jws_algs.py\n"
+                "+++ b/authlib/jose/rfc7518/jws_algs.py\n"
+                "@@ -1 +1 @@\n-old\n+new\n",
+                "partial guard",
+            )],
+            changed_files=[],
+            test_changes=[],
+            security_notes=[],
+            assumptions=[],
+            risks=[],
+            validation_plan=PatchValidationPlan([], [], [], False),
+            policy_check=PatchPolicyCheck(True, False, 1, 2, True, []),
+        )
+
+        result = ValidationToolchain().validate(partial, remediation, [])
+
+        self.assertEqual(result.status, PatchValidationStatus.FAILED)
+        self.assertFalse(result.report_ready)
+        self.assertTrue(any(f.check == "planned_change_artifacts" for f in result.failures))
+        feedback = result.feedback_for_failure_analysis or ""
+        self.assertIn("authlib/jose/rfc7515/jws.py", feedback)
+        self.assertIn("authlib/jose/rfc7519/jwt.py", feedback)
+
     def test_executor_applies_diff_and_captures_real_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

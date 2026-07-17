@@ -7,34 +7,6 @@
 
 <div x-data="repoBrowser()">
   {% if not current_repo %}
-  <div class="card mb-2" x-init="loadConfigStatus()">
-    <div class="section-heading"><span>运行配置状态</span></div>
-    <div class="audit-grid">
-      <div class="audit-card">
-        <strong>LLM</strong>
-        <div class="mt-1">
-          <span class="badge" :class="config.llm && config.llm.enabled ? 'badge-success' : 'badge-failed'"
-                x-text="config.llm && config.llm.enabled ? 'enabled' : 'disabled'"></span>
-          <span x-text="config.llm ? config.llm.model : ''"></span>
-        </div>
-      </div>
-      <div class="audit-card">
-        <strong>GitHub PR / 私有仓库</strong>
-        <div class="mt-1">
-          <span class="badge" :class="config.pull_request && config.pull_request.github.enabled ? 'badge-success' : 'badge-low'"
-                x-text="config.pull_request && config.pull_request.github.enabled ? 'token configured' : 'optional token missing'"></span>
-        </div>
-      </div>
-      <div class="audit-card">
-        <strong>GitLab MR / 私有仓库</strong>
-        <div class="mt-1">
-          <span class="badge" :class="config.pull_request && config.pull_request.gitlab.enabled ? 'badge-success' : 'badge-low'"
-                x-text="config.pull_request && config.pull_request.gitlab.enabled ? 'token configured' : 'optional token missing'"></span>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="repo-bind-grid mb-2">
     <div class="card">
       <h3 class="compact-title">绑定远程 Git 仓库</h3>
@@ -189,16 +161,6 @@ function repoBrowser() {
     localName: '',
     localPath: '',
     localMsg: '',
-    config: {},
-
-    async loadConfigStatus() {
-      try {
-        const resp = await fetch('/api/config/status');
-        if (resp.ok) this.config = await resp.json();
-      } catch(e) {
-        this.config = {};
-      }
-    },
 
     async cloneRepo() {
       if (!this.remoteUrl) { this.remoteMsg = '请输入 Git URL'; return; }
