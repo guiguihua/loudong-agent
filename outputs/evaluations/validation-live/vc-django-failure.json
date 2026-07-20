@@ -1,0 +1,703 @@
+{
+  "finding": {
+    "schema_version": "1.0",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "vulnerability_type": "Vulnerable Dependency",
+    "severity": "high",
+    "confidence": "high",
+    "scanner": "validation-coverage",
+    "locations": [
+      {
+        "file": "requirements.txt",
+        "function": null,
+        "line": null
+      },
+      {
+        "file": "pyproject.toml",
+        "function": null,
+        "line": null
+      }
+    ],
+    "evidence": [
+      "本地样例目录存在 vulnerable 版本：validation-coverage\\sql-injection\\django-5.0.6",
+      "本地样例目录存在 upstream fixed 版本：validation-coverage\\upstream-fixed\\django-5.0.8",
+      "安全回归测试包含 SQL 注入用例：tests/db_functions/datetime/test_extract_trunc.py"
+    ],
+    "recommendation": "将 Django 从 5.0.6 升级到 5.0.8，并保留 Extract/Trunc lookup_name SQL 注入回归测试。",
+    "cve": null,
+    "cwe": null,
+    "repository": "validation-coverage\\sql-injection\\django-5.0.6",
+    "revision": null,
+    "dependency": {
+      "component": "django",
+      "current_version": "5.0.6",
+      "fixed_versions": [
+        "5.0.8"
+      ],
+      "breaking_upgrade": false,
+      "usage_locations": [
+        {
+          "file": "requirements.txt",
+          "function": null,
+          "line": null
+        },
+        {
+          "file": "pyproject.toml",
+          "function": null,
+          "line": null
+        }
+      ],
+      "affected_artifacts": [
+        "validation-coverage\\sql-injection\\django-5.0.6"
+      ]
+    },
+    "raw_reference": "validation-coverage/sql-injection/django-5.0.6",
+    "normalization_warnings": []
+  },
+  "impact": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "possible",
+    "affected_services": [
+      "validation-coverage\\sql-injection\\django-5.0.6"
+    ],
+    "entry_points": [],
+    "call_paths": [],
+    "affected_assets": [
+      "validation-coverage\\sql-injection\\django-5.0.6:default"
+    ],
+    "affected_artifacts": [
+      "requirements.txt",
+      "pyproject.toml"
+    ],
+    "data_classification": [],
+    "upstream_dependencies": [
+      "django==5.0.6"
+    ],
+    "downstream_dependencies": [],
+    "regression_targets": [
+      "tests/db_functions/datetime/test_extract_trunc.py"
+    ],
+    "suggested_tests": [
+      "新增 Extract/Trunc lookup_name SQL 注入回归测试，验证用户可控 lookup_name 参数无法注入 SQL",
+      "升级 Django 至 5.0.8 后运行全量 pytest 回归"
+    ],
+    "evidence": [
+      {
+        "evidence_id": "llm-impact",
+        "source": "agent_reasoning",
+        "assertion": "Agent 探索代码后推理的影响面评估",
+        "value": "依赖锁定证据充分：requirements.txt 和 pyproject.toml 双清单均确认 Django==5.0.6（EvidenceBundle slice-001、slice-002），该版本存在已知的 Extract/Trunc lookup_name SQL 注入漏洞（CVE-2024-42005），修复版本为 5.0.8。深度调查阶段通过 list_dir 和 search_code 工具尝试探索仓库结构和搜索 Extract/Trunc/lookup_name 相关代码，均未找到匹配结果，进一步证实仓库仅包含依赖清单文件而无应用代码。EvidenceBundle 中 entry_points、sink_candidates、source_candidates 均为空数组，repository_summary 确认 file_count=2。因此无法构建从入口到危险操作的完整调用路径，call_paths 为空。上下文提供的调用路径 ['API request', 'unknown in requirements.txt', 'sink'] 无代码切片支撑，不作为确认项。测试证据标记为 related:false，且测试文件不在当前仓库中。综合判断：依赖存在已确认（possible），但可利用性无法确认，需人工审查仓库性质及是否存在使用 Extract/Trunc 的应用代码。",
+        "confidence": "medium"
+      }
+    ],
+    "unknowns": [
+      "仓库仅含 2 个依赖清单文件（requirements.txt、pyproject.toml），无任何应用代码（视图、模型、URL 路由），无法确认 Extract/Trunc 是否被实际调用",
+      "无入口点证据：EvidenceBundle 中 entry_points 为空，search_code 在当前工作目录未找到任何 Extract/Trunc/lookup_name 相关代码，无法确认是否存在可触达漏洞的 API 或 HTTP 路由",
+      "无 sink/source 候选：EvidenceBundle 中 sink_candidates 和 source_candidates 均为空，无法构建从用户输入到危险操作的调用路径",
+      "Finding 中提及的 tests/db_functions/datetime/test_extract_trunc.py 不在当前仓库中（仓库仅 2 文件），该测试文件属于 Django 上游项目还是本仓库待确认",
+      "无运行时部署信息：该仓库是否实际部署运行、是否暴露于互联网均未知，internet_exposed 无法确定",
+      "无认证机制信息：仓库中无 settings.py 或安全配置，authentication 状态为 unknown",
+      "该仓库性质不明：从命名 validation-coverage\\sql-injection\\django-5.0.6 推测可能为安全验证/覆盖率测试样本，而非生产应用，但需人工确认",
+      "CVE-2024-42005 通用知识表明 Extract/Trunc 的 lookup_name 参数存在 SQL 注入风险，但当前仓库无代码可验证此场景是否适用"
+    ],
+    "confidence_score": 0.3,
+    "needs_human_review": true
+  },
+  "root_cause": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "probable",
+    "root_cause_category": "vulnerable_dependency",
+    "root_cause": {
+      "summary": "项目依赖 Django 5.0.6，该版本的 Extract/Trunc 数据库函数中 lookup_name 参数缺少白名单验证，可被用于 SQL 注入；修复版本 5.0.8 添加了输入验证。",
+      "source": null,
+      "propagation": [
+        {
+          "symbol": "Extract.__init__ / Trunc.__init__ (inferred)",
+          "operation": "lookup_name 参数被存储在实例属性中，未经白名单验证"
+        },
+        {
+          "symbol": "Extract.as_sql / Trunc.as_sql (inferred)",
+          "operation": "lookup_name 被直接拼接到 SQL 模板字符串中而非参数化传递"
+        },
+        {
+          "symbol": "database cursor execute (inferred)",
+          "operation": "包含未参数化 lookup_name 的 SQL 被发送到数据库执行"
+        }
+      ],
+      "sink": null,
+      "missing_control": "lookup_name 白名单验证 — Extract/Trunc 类应验证 lookup_name 仅包含预定义合法值（year, month, day, hour, minute, second 等），拒绝任何不在白名单中的值",
+      "failed_existing_controls": [],
+      "trigger_conditions": [
+        "应用使用 Django 5.0.6（已在 requirements.txt:1 和 pyproject.toml:1 中确认）",
+        "应用代码将用户可控输入传递给 Extract() 或 Trunc() 的 lookup_name 参数",
+        "数据库连接具有足够权限执行注入的 SQL"
+      ]
+    },
+    "contributing_factors": [
+      "Django 5.0.6 的 Extract/Trunc 实现将 lookup_name 直接用于 SQL 构建而非参数化（推断）",
+      "ORM 层未对 lookup_name 进行白名单校验（推断）",
+      "应用层可能将用户输入直接传递给 Extract/Trunc 的 lookup_name 参数（无法确认，仓库无应用代码）"
+    ],
+    "causal_chain": [
+      "1. 依赖清单 requirements.txt:1 和 pyproject.toml:1 声明 Django==5.0.6（源码确认）",
+      "2. Django 5.0.6 的 Extract/Trunc 数据库函数未对 lookup_name 参数进行白名单验证（基于测试路径 tests/db_functions/datetime/test_extract_trunc.py 推断，未在源码中确认）",
+      "3. lookup_name 被直接拼接到 SQL 查询字符串中而非通过参数化查询（推断，未在源码中确认）",
+      "4. 若应用将用户输入传递给 lookup_name，攻击者可注入任意 SQL",
+      "5. 修复版本 Django 5.0.8 添加了 lookup_name 白名单验证（基于 EvidenceBundle 中 upstream-fixed 版本信息推断）"
+    ],
+    "affected_code": [
+      {
+        "file": "pyproject.toml",
+        "function": null,
+        "lines": [
+          1
+        ],
+        "role": "依赖声明：Django==5.0.6（易受攻击版本）"
+      },
+      {
+        "file": "requirements.txt",
+        "function": null,
+        "lines": [
+          1
+        ],
+        "role": "依赖声明：Django==5.0.6（易受攻击版本）"
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "llm-root-cause",
+        "source": "agent_reasoning",
+        "assertion": "Agent 探索代码后推理的根因分析",
+        "value": "工具调查确认：仓库仅包含 2 个文件（requirements.txt 和 pyproject.toml），两者均声明 Django==5.0.6。search_code 搜索 lookup_name、Extract、Trunc、as_sql 均未找到匹配结果，确认仓库中不包含 Django 源码或应用代码。EvidenceBundle 提供的关键证据为：(1) 依赖版本 Django==5.0.6（源码确认），(2) 安全回归测试路径 tests/db_functions/datetime/test_extract_trunc.py（指向 Extract/Trunc），(3) upstream fixed 版本 django-5.0.8。基于测试路径名称，漏洞明确涉及 Django 的 Extract/Trunc 数据库函数的 lookup_name 参数。根据 Django 安全公告历史（CVE-2024-42005），5.0.7/5.0.8 修复了 Extract/Trunc 中 lookup_name 参数的 SQL 注入问题，该参数在 as_sql() 中被直接拼接到 SQL 模板而未经白名单验证。但由于仓库中无 Django 源码，source、sink 和传播路径的具体源码位置无法确认，均基于推断。置信度为 0.65：依赖版本和测试路径已确认，但攻击机制的源码级证据缺失。",
+        "confidence": "medium"
+      }
+    ],
+    "alternative_hypotheses": [
+      {
+        "hypothesis": "漏洞在 Django 5.0.6 的 Extract/Trunc 类的 lookup_name 参数缺少白名单验证，导致 SQL 注入",
+        "result": "unresolved",
+        "reason": "测试路径 tests/db_functions/datetime/test_extract_trunc.py 和版本升级 5.0.6→5.0.8 强烈支持此假设，但仓库中不包含 Django 源码，无法从源码确认具体实现"
+      },
+      {
+        "hypothesis": "漏洞在 Django 其他组件（非 Extract/Trunc）",
+        "result": "rejected",
+        "reason": "安全回归测试路径明确指向 test_extract_trunc.py，排除了其他组件"
+      },
+      {
+        "hypothesis": "漏洞在应用层自身代码而非依赖问题",
+        "result": "rejected",
+        "reason": "EvidenceBundle 显示这是依赖版本问题（5.0.6→5.0.8），仓库仅包含 2 个依赖清单文件（requirements.txt 和 pyproject.toml），无应用代码"
+      },
+      {
+        "hypothesis": "lookup_name 通过 kwargs 传入 Extract.__init__ 并在 as_sql 中被直接拼接到 SQL 模板",
+        "result": "unresolved",
+        "reason": "符合 Django ORM 的已知设计模式，但仓库中无 Django 源码可确认具体拼接方式"
+      }
+    ],
+    "confidence_score": 0.35,
+    "unknowns": [
+      "Django 5.0.6 中 Extract/Trunc 的具体源码位置和实现细节 — 仓库不包含 Django 源码，仅包含 requirements.txt 和 pyproject.toml",
+      "source 的确切文件和行号 — source_candidates 为空，仓库中无 Django 源码",
+      "sink 的确切文件和行号 — sink_candidates 为空，仓库中无 Django 源码",
+      "应用层是否实际将用户输入传递给 lookup_name — 仓库仅包含依赖清单，无应用代码",
+      "lookup_name 在 SQL 构建中的具体拼接方式（字符串格式化 vs 模板替换）— 未在源码中确认",
+      "entry_points 为空，无法确认具体的攻击入口路径",
+      "测试文件 tests/db_functions/datetime/test_extract_trunc.py 不在当前仓库中，无法读取其内容",
+      "unverified source location removed: unknown:Extract/Trunc lookup_name parameter (inferred from test path, not confirmed in source)",
+      "unverified sink location removed: unknown:SQL query execution via lookup_name string interpolation (inferred, not confirmed in source)",
+      "root_cause_has_unknowns: both source and sink unverified — downstream agents must widen scope and verify each candidate file",
+      "multi_file_causal_chain: 2 files in source→sink→affected_code chain — remediation must cover all"
+    ],
+    "needs_human_review": true,
+    "recommended_fix_constraints": [
+      "将 Django 从 5.0.6 升级到 5.0.8 或更高版本",
+      "保留 tests/db_functions/datetime/test_extract_trunc.py 中的 SQL 注入回归测试",
+      "升级后验证应用中所有 Extract/Trunc 调用仍正常工作",
+      "审计应用代码确认不存在将用户输入直接传递给 lookup_name 的模式"
+    ],
+    "security_invariant": "ORM 层生成的 SQL 中，所有从用户输入派生的标识符（如 lookup_name）必须经过白名单验证，确保只包含预定义的合法值；查询结构必须与用户数据严格分离。",
+    "guardrail": "Extract/Trunc 类必须在 as_sql() 执行前验证 lookup_name ∈ {合法白名单值}，否则拒绝查询构建。",
+    "broken_mechanism": [
+      "入口：用户输入可能通过应用层传递给 Extract(lookup_name=...) 或 Trunc(lookup_name=...)（推断，仓库无应用代码）",
+      "传播：lookup_name 存储在实例属性中，未经白名单验证（推断）",
+      "缺失安检：Extract/Trunc 的 as_sql() 方法未验证 lookup_name 是否为合法值（推断）",
+      "汇点：lookup_name 被直接拼接到 SQL 模板字符串中发送到数据库（推断）",
+      "触发条件：应用使用 Django 5.0.6 且将用户可控数据传递给 lookup_name 参数"
+    ],
+    "exploitability_note": "可利用性取决于应用是否将用户可控输入传递给 Extract/Trunc 的 lookup_name 参数。若应用仅使用硬编码的 lookup_name（如 ExtractYear 固定使用 'year'），则不可直接利用。但作为依赖级漏洞，任何使用 Django 5.0.6 且动态构造 Extract/Trunc 的应用都处于风险中。仓库本身仅包含依赖清单文件，无法评估应用层暴露面。"
+  },
+  "evidence_bundle": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "repository_summary": {
+      "repository": "validation-coverage\\sql-injection\\django-5.0.6",
+      "revision": null,
+      "file_count": 2,
+      "languages": [
+        "Python"
+      ],
+      "frameworks": [
+        "Django"
+      ],
+      "manifests": [
+        "pyproject.toml",
+        "requirements.txt"
+      ]
+    },
+    "target_files": [
+      {
+        "path": "requirements.txt",
+        "matched_by": "exact_path",
+        "line_count": 1,
+        "sha256": "d3a424c785fae6a4ad2085fc73f8387f68ecdb625292acdaa74e503ffd99bdc6",
+        "language": null
+      },
+      {
+        "path": "pyproject.toml",
+        "matched_by": "exact_path",
+        "line_count": 1,
+        "sha256": "122cae4bee4da918b1a6f30c904d32b0a00d441adaf073be8bbe359344e4e83d",
+        "language": null
+      }
+    ],
+    "code_slices": [
+      {
+        "slice_id": "slice-001",
+        "path": "requirements.txt",
+        "start_line": 1,
+        "end_line": 1,
+        "content": "Django==5.0.6",
+        "reason": "finding target: requirements.txt"
+      },
+      {
+        "slice_id": "slice-002",
+        "path": "pyproject.toml",
+        "start_line": 1,
+        "end_line": 1,
+        "content": "dependencies = [\"Django==5.0.6\"]",
+        "reason": "finding target: pyproject.toml"
+      }
+    ],
+    "entry_points": [],
+    "source_candidates": [],
+    "sink_candidates": [],
+    "dependency_evidence": [
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": null,
+        "line": null,
+        "source": "normalized_finding"
+      },
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": "pyproject.toml",
+        "line": 1,
+        "source": "manifest"
+      },
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": "requirements.txt",
+        "line": 1,
+        "source": "manifest"
+      }
+    ],
+    "test_evidence": [
+      {
+        "path": null,
+        "framework": null,
+        "command": "python -m pytest",
+        "related": false,
+        "snippet_id": null
+      }
+    ],
+    "config_evidence": [
+      {
+        "path": "pyproject.toml",
+        "key": "dependency_manifest",
+        "line": null,
+        "value": "present",
+        "source": "repository"
+      },
+      {
+        "path": "requirements.txt",
+        "key": "dependency_manifest",
+        "line": null,
+        "value": "present",
+        "source": "repository"
+      }
+    ],
+    "validation_capabilities": {
+      "build_commands": [
+        "python -m compileall -q ."
+      ],
+      "test_commands": [
+        "python -m pytest"
+      ],
+      "security_commands": [],
+      "scanner_commands": [
+        "osv-scanner --recursive ."
+      ],
+      "detected_tools": [
+        "python",
+        "osv-scanner"
+      ]
+    },
+    "collection_warnings": [],
+    "bundle_hash": "a9fdf6f83734565a65254930679e2b02aa99238c1092ca673a8ed42cbcaf2e93"
+  },
+  "repair_route": {
+    "family": "dependency",
+    "preferred_executor": "sca_dependency_executor",
+    "active_executor": "sca_dependency_executor",
+    "verification_profile": {
+      "name": "dependency_upgrade",
+      "required_layers": [
+        "build",
+        "business_regression",
+        "scanner_rescan",
+        "differential_risk"
+      ],
+      "optional_layers": [
+        "security_regression"
+      ],
+      "rationale": "Require install/build, regression, lockfile diff risk, and scanner rescan when available.",
+      "security_oracles": [
+        "dependency_resolution",
+        "compatibility_regression",
+        "sca_rescan"
+      ]
+    },
+    "confidence": 0.98,
+    "automation_eligible": true,
+    "blocking_reasons": [],
+    "missing_evidence": [
+      "security_regression_command"
+    ],
+    "fallback_reason": null
+  },
+  "status": "exhausted",
+  "run_mode": "balanced",
+  "reasoning_trace": {
+    "impact": {
+      "stage": "impact",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "bounded_react",
+      "escalated": true,
+      "escalation_reasons": [
+        "confidence_below_0.4",
+        "high_severity_without_confirmed_call_path"
+      ],
+      "llm_calls": 5,
+      "tool_calls": {
+        "list_dir": 1,
+        "search_code": 3
+      },
+      "stopped_reason": "no_new_evidence",
+      "details": {}
+    },
+    "root_cause": {
+      "stage": "root_cause",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "hypothesis_test",
+      "escalated": true,
+      "escalation_reasons": [
+        "sink_missing",
+        "high_severity_confidence_below_0.6"
+      ],
+      "llm_calls": 6,
+      "tool_calls": {
+        "list_dir": 1,
+        "read_file": 2,
+        "search_code": 2
+      },
+      "stopped_reason": "no_new_evidence",
+      "details": {
+        "hypotheses": []
+      }
+    },
+    "remediation": {
+      "stage": "remediation",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "bounded_react",
+      "escalated": true,
+      "escalation_reasons": [
+        "root_cause_confidence_below_0.5",
+        "root_cause_has_unknowns",
+        "previous_failure_requires_source_recheck"
+      ],
+      "llm_calls": 2,
+      "tool_calls": {
+        "read_file": 2,
+        "list_dir": 1
+      },
+      "stopped_reason": "model_completed",
+      "details": {
+        "final_decision": "plan_and_solve_with_candidate_ranking"
+      }
+    },
+    "patch": {
+      "stage": "patch",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "patch_synthesis",
+      "escalated": false,
+      "escalation_reasons": [],
+      "llm_calls": 0,
+      "tool_calls": {},
+      "stopped_reason": null,
+      "details": {
+        "artifacts_count": 1,
+        "executor": "sca_dependency_workspace_executor",
+        "change_set": {
+          "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+          "component": "django",
+          "current_version": "5.0.6",
+          "target_version": "5.0.8",
+          "ecosystem": "python",
+          "dependency_scope": "direct",
+          "compatibility_risk": "same_major_upgrade",
+          "manifests": [
+            "requirements.txt"
+          ],
+          "lockfiles": [],
+          "validation_invariants": [
+            "the vulnerable direct version is absent from changed declarations",
+            "the selected version is one of the reported fixed versions",
+            "all changed manifests remain syntactically valid",
+            "lock metadata must not be silently left stale"
+          ]
+        },
+        "workspace_checks": [
+          {
+            "name": "edit:requirements.txt",
+            "passed": true,
+            "details": "updated django from 5.0.6 to 5.0.8",
+            "duration_ms": 0
+          },
+          {
+            "name": "syntax:requirements.txt",
+            "passed": true,
+            "details": "manifest syntax is valid",
+            "duration_ms": 0
+          },
+          {
+            "name": "fixed_dependency_declaration",
+            "passed": true,
+            "details": "fixed direct dependency is declared",
+            "duration_ms": 0
+          }
+        ],
+        "repair_session": null
+      }
+    },
+    "failure": {
+      "stage": "failure",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "reflexion_diagnosis",
+      "escalated": false,
+      "escalation_reasons": [],
+      "llm_calls": 1,
+      "tool_calls": {},
+      "stopped_reason": null,
+      "details": {
+        "failed_layers": [
+          "differential_risk"
+        ],
+        "route_to": "patch_generation_agent",
+        "reflection_count": 1
+      }
+    }
+  },
+  "report": {
+    "report_id": "report-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-blocked",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "status": "blocked",
+    "title": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断",
+    "executive_summary": "候选补丁已经生成，但已执行的必要验证未通过。",
+    "root_cause_summary": "",
+    "remediation_summary": "",
+    "changed_files": [],
+    "test_results": [],
+    "security_validation_results": [],
+    "validation_summary": [],
+    "risk_summary": [],
+    "rollback_summary": "",
+    "human_review_focus": [
+      "请先处理验证失败原因，再生成正式修复报告。"
+    ],
+    "pr_description_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：planned_change_artifacts: missing artifacts for planned changes: optional (recommended): pyproject.toml\n\n## 未验证的候选补丁\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+    "ticket_comment_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：planned_change_artifacts: missing artifacts for planned changes: optional (recommended): pyproject.toml\n\n## 未验证的候选补丁\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+    "sections": [],
+    "blocked_reason": "planned_change_artifacts: missing artifacts for planned changes: optional (recommended): pyproject.toml",
+    "needs_human_review": true
+  },
+  "report_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：planned_change_artifacts: missing artifacts for planned changes: optional (recommended): pyproject.toml\n\n## 未验证的候选补丁\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+  "patch_candidate": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "generated",
+    "summary": "SCA executor upgraded django from 5.0.6 to 5.0.8 across 1 manifest(s)",
+    "artifacts": [
+      {
+        "patch_type": "dependency",
+        "target": "requirements.txt",
+        "content": "diff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8",
+        "description": "Git-generated direct dependency upgrade from the verified SCA workspace",
+        "needs_manual_fix": false,
+        "fix_reason": ""
+      }
+    ],
+    "changed_files": [
+      {
+        "file": "requirements.txt",
+        "change_type": "dependency",
+        "reason": "replace vulnerable direct dependency django 5.0.6 with fixed version 5.0.8"
+      }
+    ],
+    "test_changes": [
+      {
+        "name": "验证 Django 版本已升级至 5.0.8",
+        "test_type": "dependency_check",
+        "target": "requirements.txt / pyproject.toml",
+        "assertion": "安装的 Django 版本应 >= 5.0.8"
+      },
+      {
+        "name": "Extract/Trunc 函数 lookup_name SQL 注入回归测试",
+        "test_type": "security_regression",
+        "target": "django.db.models.functions.Extract / Trunc",
+        "assertion": "传入恶意 lookup_name 值时应被白名单拒绝或报错，不应产生 SQL 注入"
+      },
+      {
+        "name": "项目功能回归测试",
+        "test_type": "integration",
+        "target": "项目测试套件",
+        "assertion": "升级 Django 后所有现有测试通过，无功能回归"
+      },
+      {
+        "name": "business contract regression from failed validation",
+        "test_type": "business_regression",
+        "target": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+        "assertion": "existing API response shape and semantics remain unchanged"
+      }
+    ],
+    "security_notes": [
+      "Target version was selected only from reported fixed_versions.",
+      "Manifest syntax and the exact dependency declaration were re-parsed.",
+      "Git generated the final unified diff from verified workspace edits."
+    ],
+    "assumptions": [],
+    "risks": [
+      "Compatibility risk classification: same_major_upgrade. Full consumer compatibility requires the configured build and regression commands."
+    ],
+    "validation_plan": {
+      "build_commands": [
+        "run Django test runner tests"
+      ],
+      "security_tests": [
+        "Extract/Trunc 函数 lookup_name SQL 注入回归测试"
+      ],
+      "business_regression_tests": [
+        "business contract regression from failed validation"
+      ],
+      "scanner_rescan_required": false
+    },
+    "policy_check": {
+      "allowed_files_only": true,
+      "forbidden_changes_detected": false,
+      "changed_files_count": 1,
+      "estimated_diff_lines": 2,
+      "within_patch_boundaries": true,
+      "violations": []
+    },
+    "blocked_reason": null,
+    "needs_human_review": true
+  },
+  "patch_validation": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "failed",
+    "layers": [
+      {
+        "layer": "differential_risk",
+        "status": "failed",
+        "tool_results": [],
+        "summary": "candidate failed static precheck with fatal blockers; external validation was not started"
+      }
+    ],
+    "failures": [
+      {
+        "check": "planned_change_artifacts",
+        "reason": "missing artifacts for planned changes: optional (recommended): pyproject.toml",
+        "suggested_adjustment": "为每个 planned_change 生成对应 diff"
+      }
+    ],
+    "next_action": "send_to_failure_analysis_agent",
+    "feedback_for_failure_analysis": "planned_change_artifacts: missing artifacts for planned changes: optional (recommended): pyproject.toml",
+    "report_ready": false,
+    "needs_human_review": true
+  },
+  "patch_quality": {
+    "candidate_status": "generated",
+    "executable_artifact_rate": 1.0,
+    "planned_change_coverage_rate": 0.5,
+    "validation_layer_pass_rate": 0.0,
+    "changed_files_count": 1,
+    "estimated_diff_lines": 2,
+    "manual_fix_artifact_count": 0,
+    "generated_test_contract_valid": false,
+    "missing_planned_changes": [
+      "pyproject.toml"
+    ],
+    "quality_gate_passed": false,
+    "ready_for_automated_delivery": false,
+    "gate_failures": [
+      "planned_changes_without_executable_artifacts: pyproject.toml",
+      "validation_status:failed",
+      "security_test_missing_attack_or_legitimate_behavior_direction"
+    ]
+  },
+  "failure_analysis": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "primary_category": "differential_risk",
+    "summary": "SCA 版本升级补丁在 differential_risk 静态预检阶段因 fatal blocker 失败：最可能原因是仅修改了 1 个 manifest 声明文件而未同步 lockfile 及传递依赖兼容性验证，导致预检直接拦截，外部动态验证未启动。",
+    "findings": [
+      {
+        "category": "differential_risk",
+        "severity": "high",
+        "failed_layer": "differential_risk",
+        "summary": "candidate failed static precheck with fatal blockers; external validation was not started",
+        "evidence": [],
+        "suspected_reason": "the patch changed files or behavior outside the justified boundary",
+        "suggested_adjustment": "remove unjustified changes and regenerate only allowed artifacts"
+      }
+    ],
+    "route_to": "patch_generation_agent",
+    "remediation_feedback": [
+      "修复方案必须将 lockfile 同步纳入补丁范围，不能仅修改 manifest 版本声明。明确列出需要同步的 lockfile 文件路径。",
+      "修复方案中应增加 '传递依赖兼容性验证' 步骤：在升级 Django 后执行全量依赖解析，确认无冲突；若有冲突依赖，需一并升级并在方案中说明。",
+      "修复方案应明确 Django 5.0.7/5.0.8 的 release notes 中是否有 breaking change，并评估对项目"
+    ],
+    "patch_generation_feedback": [
+      "remove unjustified changes and regenerate only allowed artifacts"
+    ],
+    "validation_feedback": [],
+    "requires_root_cause_recheck": false,
+    "needs_human_review": true,
+    "diagnostic_hypotheses": [
+      "H1: SCA executor 仅修改 manifest 版本声明，未同步 lockfile，静态预检检测到 manifest-lockfile 不一致 → fatal blocker。反证：若项目无 lockfile 或 lockfile 已同步至 5.0.8 则排除。",
+      "H2: Django 5.0.8 与项目中其他 pinned 依赖（如 djangorestframework、celery、django-filter）存在版本上界冲突，静态依赖解析器报冲突。反证：若依赖树中无对 Django <5.0.8 的约束则排除。",
+      "H3: Django 5.0.7/5.0.8 包含 breaking change（弃用 API 移除/签名变更），静态预检扫描项目代码发现受影响调用。反证：若项目未使用 5.0.7/5.0.8 release notes 中标记 breaking 的 API 则排除。",
+      "H4: manifest 中版本说明符语法错误（如缺少操作符或格式不规范），静态预检解析器报语法错误。反证：若 manifest diff 语法正确则排除。",
+      "H5: 静态预检策略将任何核心框架版本变更标记为 fatal blocker 要求人工确认，属工具链策略过于保守。反证：若同类 patch 曾通过预检则排除。"
+    ],
+    "reflection": [
+      "differential_risk: the patch changed files or behavior outside the justified boundary"
+    ],
+    "do_not_repeat": [
+      "do not repeat patch behavior that caused differential_risk: candidate failed static precheck with fatal blockers; external validation was not started"
+    ]
+  }
+}

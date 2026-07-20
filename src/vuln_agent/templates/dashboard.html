@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 — 漏洞修复智能体平台{% endblock %}
+{% block content %}
+
+<h1 class="page-title">📊 仪表盘</h1>
+<p class="page-subtitle">漏洞修复流水线总览</p>
+
+<!-- Stats -->
+<div class="stat-grid">
+  <div class="card stat-card">
+    <div class="stat-value">{{ stats.total }}</div>
+    <div class="stat-label">总计修复</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-value text-green">{{ stats.succeeded }}</div>
+    <div class="stat-label">成功</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-value text-yellow">{{ stats.blocked }}</div>
+    <div class="stat-label">阻断 / 待复核</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-value text-red">{{ stats.failed }}</div>
+    <div class="stat-label">失败</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-value">{{ stats.pending }}</div>
+    <div class="stat-label">运行中 / 等待</div>
+  </div>
+</div>
+
+<!-- Quick actions -->
+<div class="flex gap-2 mb-2" style="margin-bottom: 1.5rem;">
+  <a href="/new" class="btn btn-primary">➕ 新建修复任务</a>
+  <a href="/chat" class="btn btn-secondary">💬 对话分析</a>
+  <a href="/repo" class="btn btn-secondary">📁 代码仓库管理</a>
+</div>
+
+<!-- Recent tasks -->
+<div class="card">
+  <div class="flex-between mb-2">
+    <h3 style="font-size: 1rem;">最近任务</h3>
+    <a href="/history" class="btn btn-sm btn-secondary">查看全部 →</a>
+  </div>
+  {% if recent_tasks %}
+  <table>
+    <thead>
+      <tr>
+        <th>漏洞 ID</th>
+        <th>类型</th>
+        <th>严重性</th>
+        <th>状态</th>
+        <th>时间</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for t in recent_tasks %}
+      <tr>
+        <td><a href="/finding/{{ t.task_id }}" style="color: var(--accent2); text-decoration: none;">{{ t.task_id }}</a></td>
+        <td>{{ t.vuln_type or '—' }}</td>
+        <td><span class="badge badge-{{ t.severity or 'medium' }}">{{ t.severity or '—' }}</span></td>
+        <td>
+          {% if t.status == 'succeeded' %}
+            <span class="badge badge-success">✅ 成功</span>
+          {% elif t.status == 'blocked' %}
+            <span class="badge badge-blocked">⚠️ 阻断</span>
+          {% elif t.status == 'failed' %}
+            <span class="badge badge-failed">❌ 失败</span>
+          {% elif t.status == 'running' %}
+            <span class="spinner"></span> 运行中
+          {% else %}
+            ⏳ {{ t.status }}
+          {% endif %}
+        </td>
+        <td class="text-muted">{{ t.created_at_str }}</td>
+        <td><a href="/finding/{{ t.task_id }}" class="btn btn-sm btn-secondary">查看</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div style="text-align: center; padding: 3rem; color: var(--text2);">
+    <p style="font-size: 2rem; margin-bottom: .5rem;">🔍</p>
+    <p>还没有任何修复任务</p>
+    <a href="/new" class="btn btn-primary mt-2">创建第一个任务</a>
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

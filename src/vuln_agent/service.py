@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .failure_analysis import FailureAnalysisAgent
+from .evidence import EvidenceCollector
 from .impact import ImpactAnalysisAgent
 from .models import EngineeringContext, PatchValidationStatus, RepositoryContext, SourceFile
 from .normalization import VulnerabilityNormalizer
@@ -32,10 +33,20 @@ class IntakeImpactService:
 
     def process(self, raw: dict[str, Any]) -> dict[str, Any]:
         finding = self.normalizer.normalize(raw)
-        impact = self.impact_agent.analyze(finding)
-        result = {"finding": finding.to_dict(), "impact": impact.to_dict()}
+        evidence_bundle = EvidenceCollector().collect(
+            finding,
+            self.source_files,
+            self.repository_context,
+            self.engineering_context,
+        )
+        impact = self.impact_agent.analyze(finding, evidence_bundle)
+        result = {
+            "finding": finding.to_dict(),
+            "evidence_bundle": evidence_bundle.to_dict(),
+            "impact": impact.to_dict(),
+        }
         if self.root_cause_agent:
-            root_cause = self.root_cause_agent.analyze(finding, impact)
+            root_cause = self.root_cause_agent.analyze(finding, impact, evidence_bundle)
             result["root_cause"] = root_cause.to_dict()
             if self.remediation_agent:
                 remediation_plan = self.remediation_agent.plan(
@@ -43,6 +54,8 @@ class IntakeImpactService:
                     impact,
                     root_cause,
                     self.engineering_context,
+                    None,
+                    evidence_bundle,
                 )
                 result["remediation_plan"] = remediation_plan.to_dict()
                 if self.patch_generation_agent:
@@ -53,6 +66,8 @@ class IntakeImpactService:
                         remediation_plan,
                         self.repository_context,
                         self.source_files,
+                        None,
+                        evidence_bundle,
                     )
                     result["patch_candidate"] = patch_candidate.to_dict()
                     if self.patch_validation_agent:
@@ -83,6 +98,7 @@ class IntakeImpactService:
                                 root_cause,
                                 self.engineering_context,
                                 failure_analysis,
+                                evidence_bundle,
                             ).to_dict()
                         if (
                             self.remediation_report_agent

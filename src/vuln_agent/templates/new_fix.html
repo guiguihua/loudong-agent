@@ -1,0 +1,428 @@
+{% extends "base.html" %}
+{% block title %}新建漏洞任务 - VulnFix{% endblock %}
+{% block content %}
+
+<h1 class="page-title">新建漏洞修复任务</h1>
+<p class="page-subtitle">选择已绑定代码仓库，输入或上传漏洞报告，Agent 将基于仓库上下文完成定位、分析、建议、补丁草案和验证。</p>
+{% set model_options = available_llm_models|default(['glm-5.2', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'], true) %}
+{% set selected_llm_model = model_options[0] %}
+
+<div x-data="newFixApp" x-init="init()">
+  <form id="fix-form" @submit.prevent="submitTask">
+    <div class="card mb-2">
+      <div class="section-heading">
+        <span>1. 代码仓库</span>
+        <a href="/repo" class="btn btn-sm btn-secondary">管理仓库</a>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>选择已绑定仓库</label>
+          <select name="repo_id" x-model="repoId" @change="selectRepo">
+            <option value="">不使用绑定仓库，改用临时源码</option>
+            <template x-for="repo in repos" :key="repo.id">
+              <option :value="repo.id" x-text="repo.name + ' / ' + (repo.branch || repo.default_branch || 'HEAD')"></option>
+            </template>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>分支 / Commit</label>
+          <select x-model="branch" x-show="selectedRepo && selectedRepo.branches && selectedRepo.branches.length">
+            <template x-for="b in selectedRepo.branches" :key="b">
+              <option :value="b" x-text="b"></option>
+            </template>
+          </select>
+          <input x-model="branch" x-show="!selectedRepo || !selectedRepo.branches || !selectedRepo.branches.length" placeholder="main">
+        </div>
+      </div>
+
+      <template x-if="selectedRepo">
+        <div class="repo-summary">
+          <div><strong x-text="selectedRepo.name"></strong></div>
+          <div class="text-muted" x-text="selectedRepo.url || selectedRepo.local_path"></div>
+          <div class="repo-meta">
+            <span class="badge badge-low" x-text="selectedRepo.provider || 'git'"></span>
+            <span class="badge badge-success">read</span>
+            <span class="badge badge-medium" x-show="selectedRepo.index_status" x-text="'indexed ' + ((selectedRepo.index_status && selectedRepo.index_status.last_indexed_commit) || '')"></span>
+          </div>
+        </div>
+      </template>
+
+      <div x-show="!repoId" class="fallback-source">
+        <div class="tabs mb-2">
+          <div class="tab" :class="{ active: sourceMode === 'upload' }" @click="sourceMode = 'upload'">上传源码</div>
+          <div class="tab" :class="{ active: sourceMode === 'paste' }" @click="sourceMode = 'paste'">粘贴代码</div>
+        </div>
+        <div x-show="sourceMode === 'upload'" class="drop-zone"
+             @dragover.prevent="$el.classList.add('dragover')"
+             @dragleave.prevent="$el.classList.remove('dragover')"
+             @drop.prevent="handleSourceDrop($event)"
+             @click="$refs.sourceFileInput.click()">
+          拖拽源码文件到此处，或点击选择
+          <input type="file" multiple @change="handleSourceSelect($event)" x-ref="sourceFileInput">
+        </div>
+        <div x-show="sourceMode === 'paste'" class="form-group">
+          <label>文件路径</label>
+          <input type="text" id="paste-path" placeholder="src/api/search.py" style="margin-bottom:.5rem;">
+          <label>代码内容</label>
+          <textarea id="paste-code" placeholder="粘贴源代码..." style="min-height:180px;"></textarea>
+          <button type="button" class="btn btn-sm btn-secondary mt-1" @click="addPastedFile">添加代码</button>
+        </div>
+        <div id="file-list" class="text-muted mt-1"></div>
+      </div>
+    </div>
+
+    <div class="card mb-2">
+      <div class="section-heading"><span>2. 漏洞报告</span></div>
+
+      <div class="tabs mb-2">
+        <div class="tab" :class="{ active: reportMode === 'form' }" @click="reportMode = 'form'">结构化输入</div>
+        <div class="tab" :class="{ active: reportMode === 'raw' }" @click="reportMode = 'raw'">原始报告</div>
+        <div class="tab" :class="{ active: reportMode === 'json' }" @click="reportMode = 'json'">JSON</div>
+      </div>
+
+      <div x-show="reportMode === 'form'">
+        <div class="form-row">
+          <div class="form-group">
+            <label>漏洞 ID</label>
+            <input type="text" name="finding_id" placeholder="F-001 或 CVE-2024-xxxx">
+          </div>
+          <div class="form-group">
+            <label>漏洞类型</label>
+            <select name="vulnerability_type">
+              <option value="">由报告解析补全</option>
+              <option value="SQL Injection">SQL Injection</option>
+              <option value="Cross-Site Scripting">Cross-Site Scripting</option>
+              <option value="Path Traversal">Path Traversal</option>
+              <option value="Command Injection">Command Injection</option>
+              <option value="SSRF">SSRF</option>
+              <option value="Deserialization">Deserialization</option>
+              <option value="Sensitive Information Exposure">Sensitive Information Exposure</option>
+              <option value="Authentication Bypass">Authentication Bypass</option>
+              <option value="Authorization Bypass">Authorization Bypass</option>
+              <option value="Weak Cryptography">Weak Cryptography</option>
+              <option value="Race Condition">Race Condition</option>
+              <option value="Dependency">Dependency</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>严重性</label>
+            <select name="severity">
+              <option value="critical">Critical</option>
+              <option value="high" selected>High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>扫描器 / 来源</label>
+            <select name="scanner">
+              <option value="Manual">Manual</option>
+              <option value="SAST">SAST</option>
+              <option value="SCA">SCA</option>
+              <option value="DAST">DAST</option>
+              <option value="CVE">CVE</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>影响文件 / 组件</label>
+            <input type="text" name="affected_file" placeholder="src/api/search.py 或 package-name">
+          </div>
+          <div class="form-group">
+            <label>影响函数 / 版本 / 行号</label>
+            <input type="text" name="affected_function" placeholder="search_users:42 或 1.2.3">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>CVE / CWE</label>
+            <input type="text" name="cve" placeholder="CVE-2024-xxxx / CWE-89">
+          </div>
+          <div class="form-group">
+            <label>影响接口</label>
+            <input type="text" name="entry_point" placeholder="POST /api/search">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>漏洞描述、证据、复现步骤、请求响应</label>
+          <textarea name="evidence" placeholder="粘贴漏洞描述、扫描结果、请求响应、复现步骤或其他线索..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>扫描器建议修复方式</label>
+          <input type="text" name="recommendation" placeholder="可选">
+        </div>
+      </div>
+
+      <div x-show="reportMode === 'raw'">
+        <div class="form-group">
+          <label>上传报告文件</label>
+          <input type="file" @change="handleReportFile($event)">
+        </div>
+        <div class="form-group">
+          <label>原始漏洞报告</label>
+          <textarea name="raw_report" x-model="rawReport" placeholder="粘贴 Markdown、扫描器输出、复现步骤、HTTP 请求响应等..." style="min-height:260px;"></textarea>
+        </div>
+      </div>
+
+      <div x-show="reportMode === 'json'">
+        <div class="form-group">
+          <label>漏洞报告 JSON</label>
+          <textarea class="json-editor" x-ref="jsonInput" placeholder='{"finding_id":"F-001","vulnerability_type":"SQL Injection","severity":"high","evidence":"..."}'></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-2">
+      <div class="section-heading"><span>3. 执行选项</span></div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>底层大模型</label>
+          <select name="llm_model" x-model="llmModel" :disabled="!llm">
+            {% for model in model_options %}
+            <option value="{{ model }}">{{ model }}</option>
+            {% endfor %}
+          </select>
+          <p class="text-muted mt-1">选择本次修复任务使用的模型，点击“启动分析任务”后生效。</p>
+        </div>
+        <div class="form-group">
+          <label>运行模式</label>
+          <select name="run_mode" x-model="runMode">
+            <option value="balanced">balanced（推荐）</option>
+            <option value="fast">fast（快速审查）</option>
+            <option value="deep">deep（复杂高危）</option>
+          </select>
+        </div>
+      </div>
+      <div class="policy-grid">
+        <label><input type="checkbox" name="use_llm" value="1" x-model="llm"> 启用 LLM 推理</label>
+      </div>
+    </div>
+
+    <div id="source-files-hidden" style="display:none;"></div>
+
+    <div class="flex gap-2 mt-3" style="justify-content:flex-end;">
+      <button type="submit" class="btn btn-primary" :disabled="submitting">
+        <span x-show="!submitting">启动分析任务</span>
+        <span x-show="submitting"><span class="spinner"></span> 提交中...</span>
+      </button>
+    </div>
+  </form>
+
+  <div id="task-result" x-show="taskId" class="card mt-3">
+    <div class="flex-between">
+      <div>
+        <strong x-text="statusText"></strong>
+        <span class="text-muted" x-text="progress" style="margin-left:.75rem;"></span>
+      </div>
+      <a :href="'/finding/' + taskId" class="btn btn-sm btn-secondary" x-show="status === 'succeeded' || status === 'blocked' || status === 'failed'">查看详情</a>
+    </div>
+    <div class="progress-steps">
+      <template x-for="n in 6" :key="n">
+        <div class="progress-step" :class="stageClass(n)" x-text="stageLabel(n)"></div>
+      </template>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.data('newFixApp', () => ({
+    repos: [],
+    selectedRepo: null,
+    repoId: '',
+    branch: '',
+    reportMode: 'form',
+    sourceMode: 'upload',
+    rawReport: '',
+    runMode: 'balanced',
+    llm: {{ 'true' if has_llm else 'false' }},
+    llmModel: 'glm-5.2',
+    submitting: false,
+    taskId: null,
+    status: '',
+    progress: '',
+    stage: 0,
+    pollTimer: null,
+
+    async init() {
+      await this.loadRepos();
+      const initialRepoId = '{{ initial_repo_id }}';
+      if (initialRepoId) {
+        this.repoId = initialRepoId;
+        this.selectRepo();
+      }
+    },
+
+    async loadRepos() {
+      try {
+        const resp = await fetch('/api/git/repos');
+        if (resp.ok) this.repos = await resp.json();
+      } catch(e) {
+        console.error('load repos failed', e);
+      }
+    },
+
+    selectRepo() {
+      this.selectedRepo = this.repos.find(r => r.id === this.repoId) || null;
+      this.branch = this.selectedRepo ? (this.selectedRepo.branch || this.selectedRepo.default_branch || 'main') : '';
+    },
+
+    get statusText() {
+      if (this.submitting && !this.status) return '提交中';
+      if (this.status === 'succeeded') return '任务完成';
+      if (this.status === 'blocked') return '流程阻断，需人工复核';
+      if (this.status === 'failed') return '任务失败';
+      if (this.status === 'running') return '执行中';
+      return '';
+    },
+
+    stageClass(n) {
+      if (this.stage > n) return 'done';
+      if (this.stage === n) return (this.status === 'failed' || this.status === 'blocked') ? 'failed' : 'active';
+      return '';
+    },
+
+    stageLabel(n) {
+      return ['创建', '解析', '影响', '根因', '补丁', '验证'][n - 1] || n;
+    },
+
+    addSourceFile(path, content) {
+      const container = document.getElementById('source-files-hidden');
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'source_file_' + path.replace(/[/\\]/g, '_');
+      input.value = content;
+      input.dataset.path = path;
+      container.appendChild(input);
+      const list = document.getElementById('file-list');
+      if (list) list.innerHTML += '<div>已添加 ' + path + '</div>';
+    },
+
+    handleSourceDrop(e) {
+      e.currentTarget.classList.remove('dragover');
+      Array.from(e.dataTransfer.files).forEach(f => this.readSourceFile(f));
+    },
+
+    handleSourceSelect(e) {
+      Array.from(e.target.files).forEach(f => this.readSourceFile(f));
+    },
+
+    readSourceFile(file) {
+      const reader = new FileReader();
+      reader.onload = ev => this.addSourceFile(file.webkitRelativePath || file.name, ev.target.result);
+      reader.readAsText(file);
+    },
+
+    addPastedFile() {
+      const pathEl = document.getElementById('paste-path');
+      const codeEl = document.getElementById('paste-code');
+      if (!codeEl.value.trim()) return;
+      this.addSourceFile(pathEl.value || 'pasted_code.py', codeEl.value);
+      pathEl.value = '';
+      codeEl.value = '';
+    },
+
+    handleReportFile(e) {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => { this.rawReport = ev.target.result; };
+      reader.readAsText(file);
+    },
+
+    async submitTask() {
+      this.submitting = true;
+      this.taskId = null;
+      this.status = '';
+      this.progress = '';
+      this.stage = 0;
+
+      try {
+        let payload = {};
+        if (this.reportMode === 'json') {
+          try {
+            payload = JSON.parse(this.$refs.jsonInput.value || '{}');
+          } catch(e) {
+            alert('JSON 格式错误: ' + e.message);
+            this.submitting = false;
+            return;
+          }
+        } else {
+          const fd = new FormData(document.getElementById('fix-form'));
+          for (const [key, value] of fd.entries()) {
+            if (key.startsWith('source_file_')) {
+              if (!payload.source_files) payload.source_files = {};
+              payload.source_files[key.replace(/^source_file_/, '').replace(/_/g, '/')] = value;
+            } else {
+              payload[key] = value;
+            }
+          }
+        }
+
+        payload.repo_id = this.repoId || payload.repo_id || '';
+        payload.branch = this.branch || payload.branch || '';
+        payload.raw_report = this.rawReport || payload.raw_report || '';
+        payload.run_mode = this.runMode || payload.run_mode || 'balanced';
+        payload.use_llm = !!this.llm;
+        payload.llm_model = this.llmModel || payload.llm_model || '';
+
+        const hidden = document.getElementById('source-files-hidden');
+        hidden.querySelectorAll('input[type=hidden]').forEach(inp => {
+          if (!payload.source_files) payload.source_files = {};
+          payload.source_files[inp.dataset.path || inp.name.replace(/^source_file_/, '').replace(/_/g, '/')] = inp.value;
+        });
+
+        const resp = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert('创建任务失败: ' + (data.error || data.detail || resp.status));
+          this.submitting = false;
+          return;
+        }
+
+        this.taskId = data.task_id;
+        this.status = 'running';
+        this.progress = '任务已创建';
+        this.startPolling();
+      } catch(e) {
+        alert('提交失败: ' + e.message);
+        this.submitting = false;
+      }
+    },
+
+    startPolling() {
+      if (this.pollTimer) clearInterval(this.pollTimer);
+      this.poll();
+      this.pollTimer = setInterval(() => this.poll(), 2000);
+    },
+
+    async poll() {
+      if (!this.taskId) return;
+      const resp = await fetch('/api/tasks/' + this.taskId);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      this.status = data.status;
+      this.progress = data.progress || '';
+      this.stage = data.stage || 0;
+      if (data.status === 'succeeded' || data.status === 'blocked' || data.status === 'failed') {
+        this.submitting = false;
+        if (this.pollTimer) clearInterval(this.pollTimer);
+      }
+    },
+  }));
+});
+</script>
+{% endblock %}

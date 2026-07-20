@@ -1,0 +1,17 @@
+{
+  "finding_id": "CVE-2022-22965",
+  "vulnerability_type": "dependency",
+  "severity": "critical",
+  "confidence": "high",
+  "scanner": "SCA",
+  "affected_file": "pom.xml",
+  "component": "org.springframework:spring-webmvc",
+  "current_version": "5.3.17",
+  "fixed_versions": ["5.3.18", "5.2.20"],
+  "breaking_upgrade": false,
+  "evidence": "Spring MVC 不安全数据绑定（Spring4Shell），允许远程代码执行",
+  "recommendation": "升级 spring-webmvc 到 5.3.18+ 或 5.2.20+",
+  "cve": "CVE-2022-22965",
+  "cwe": "CWE-94",
+  "repository": "https://github.com/spring-projects/spring-framework"
+}

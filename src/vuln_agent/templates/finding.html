@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}{{ finding_id }} — 漏洞修复智能体平台{% endblock %}
+{% block head %}
+<script src="/static/js/fix.js"></script>
+{% endblock %}
+{% block content %}
+
+<h1 class="page-title">📋 {{ finding_id }}</h1>
+
+<div x-data="taskPoller('{{ finding_id }}')" x-init="start()">
+  <!-- Progress -->
+  <div class="card" style="margin-bottom: 1.5rem;">
+    <h3 style="margin-bottom: 1rem;" x-text="statusText">加载中...</h3>
+    <div class="progress-steps">
+      <div class="progress-step" :class="stageClass(0)">📝 标准化</div>
+      <div class="progress-step" :class="stageClass(1)">🔍 影响面</div>
+      <div class="progress-step" :class="stageClass(2)">🔬 根因分析</div>
+      <div class="progress-step" :class="stageClass(3)">🔧 补丁生成</div>
+      <div class="progress-step" :class="stageClass(4)">✅ 验证报告</div>
+    </div>
+    <p class="text-muted mt-2" x-text="progress">等待开始...</p>
+
+    <!-- Spinner -->
+    <div x-show="loading" style="text-align: center; padding: 1rem;">
+      <span class="spinner" style="width: 24px; height: 24px;"></span>
+    </div>
+  </div>
+
+  <!-- Results (shown on completion) -->
+  <div x-show="!loading && result" style="display: none;">
+    <!-- Repository context -->
+    <div class="card" style="margin-bottom: 1rem;">
+      <div class="section-heading"><span>代码仓库</span></div>
+      <div class="audit-grid">
+        <div class="audit-card">
+          <strong>代码仓库</strong>
+          <template x-if="result.repository_context">
+            <div class="mt-1">
+              <div x-text="result.repository_context.name || result.repository_context.repo_id"></div>
+              <div class="text-muted" x-text="(result.repository_context.provider || 'git') + ' / ' + (result.repository_context.branch || 'HEAD')"></div>
+              <div class="text-muted" x-text="'源码文件: ' + (result.repository_context.source_file_count || 0)"></div>
+            </div>
+          </template>
+          <template x-if="!result.repository_context">
+            <p class="text-muted mt-1">本任务未绑定长期仓库，使用临时源码输入。</p>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- Impact -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: false }">
+      <div class="collapse-header" @click="open = !open">
+        🔍 影响面评估
+        <span x-text="open ? '▼' : '▶'">▶</span>
+      </div>
+      <div class="collapse-content" :class="{ open: open }">
+        <div x-html="renderResultSection('impact')"></div>
+      </div>
+    </div>
+
+    <!-- Root Cause -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: false }">
+      <div class="collapse-header" @click="open = !open">
+        🔬 根因分析
+        <span x-text="open ? '▼' : '▶'">▶</span>
+      </div>
+      <div class="collapse-content" :class="{ open: open }">
+        <div x-html="renderResultSection('root_cause')"></div>
+      </div>
+    </div>
+
+    <!-- Remediation Plan -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: true }">
+      <div class="collapse-header" @click="open = !open">
+        修复建议
+        <span x-text="open ? '收起' : '展开'">收起</span>
+      </div>
+      <div class="collapse-content open" :class="{ open: open }">
+        <div x-html="renderResultSection('remediation_plan')"></div>
+      </div>
+    </div>
+
+    <!-- Patch -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: true }">
+      <div class="collapse-header" @click="open = !open">
+        🔧 补丁
+        <span x-text="open ? '▼' : '▶'">▶</span>
+      </div>
+      <div class="collapse-content open" :class="{ open: open }">
+        <template x-if="result.patch_candidate">
+          <div>
+            <p class="text-muted mb-2">
+              <span x-text="result.patch_candidate.summary"></span>
+            </p>
+            <template x-for="(art, i) in result.patch_candidate.artifacts || []" :key="i">
+              <div style="margin-bottom: 1rem;">
+                <div class="flex-between mb-1">
+                  <span class="badge" :class="'badge-' + (art.patch_type === 'code' ? 'high' : 'medium')"
+                        x-text="art.patch_type"></span>
+                  <code x-text="art.target" style="color: var(--accent2);"></code>
+                </div>
+                <div class="diff-view" x-html="highlightDiff(art.content)"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="!result.patch_candidate">
+          <p class="text-muted">无补丁数据</p>
+        </template>
+      </div>
+    </div>
+
+    <!-- Report Markdown -->
+    <div class="card" style="margin-bottom: 1rem;" x-data="{ open: true }">
+      <div class="collapse-header" @click="open = !open">
+        📄 修复报告
+        <span x-text="open ? '▼' : '▶'">▶</span>
+      </div>
+      <div class="collapse-content open" :class="{ open: open }"
+           x-html="result.report_markdown ? marked.parse(result.report_markdown) : '<p class=text-muted>暂无报告</p>'">
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="flex gap-2 mt-3">
+      <a href="/new" class="btn btn-primary">➕ 新建修复</a>
+      <a href="/history" class="btn btn-secondary">📋 历史记录</a>
+      <a :href="'/api/tasks/' + taskId + '/result'" class="btn btn-secondary" target="_blank">📥 JSON 导出</a>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div x-show="error" style="display: none;" class="card">
+    <h3 style="color: var(--red);">❌ 错误</h3>
+    <p x-text="error" class="mt-2"></p>
+  </div>
+</div>
+
+{% endblock %}

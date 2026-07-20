@@ -6,7 +6,8 @@
 环境变量:
     DEEPSEEK_API_KEY  — DeepSeek API Key（必需）
     DEEPSEEK_BASE_URL — 自定义 API 地址（可选，默认 https://api.deepseek.com）
-    DEEPSEEK_MODEL    — 模型名（可选，默认 deepseek-chat）
+    LLM_MODEL         — 默认模型名（可选，优先于 DEEPSEEK_MODEL）
+    DEEPSEEK_MODEL    — [向后兼容] 默认模型名
 """
 
 from __future__ import annotations
@@ -16,13 +17,39 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from .config import load_env_file
+
+load_env_file()
+
 
 # ── JSON Schema 构建辅助 ──────────────────────────────────────────────
 
 
-def _model_schema(model_class: type, description: str, required_fields: list[str] | None = None) -> dict[str, Any]:
-    """从 dataclass 的 type hints 推断 JSON Schema。"""
-    return {"type": "object", "description": description, "properties": {}, "required": required_fields or []}
+def _validate_schema_required(result: dict[str, Any], schema: dict[str, Any] | None) -> list[str]:
+    """Check that result has all fields required by schema. Returns list of missing paths."""
+    if not schema or not isinstance(result, dict):
+        return []
+    required = schema.get("required", [])
+    if not isinstance(required, list):
+        return []
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        properties = {}
+    missing: list[str] = []
+    for field in required:
+        if field not in result or result[field] is None:
+            missing.append(field)
+            continue
+        field_schema = properties.get(field, {})
+        if isinstance(field_schema, dict):
+            nested_required = field_schema.get("required", [])
+            if isinstance(nested_required, list):
+                nested_value = result[field]
+                if isinstance(nested_value, dict):
+                    for nf in nested_required:
+                        if nf not in nested_value or nested_value[nf] is None:
+                            missing.append(f"{field}.{nf}")
+    return missing
 
 
 # ── ImpactAssessment schema ───────────────────────────────────────────
@@ -236,6 +263,19 @@ ROOT_CAUSE_SCHEMA = {
         },
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string", "description": "推理过程"},
+        "hypotheses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hypothesis": {"type": "string"},
+                    "required_evidence": {"type": "array", "items": {"type": "string"}},
+                    "support": {"type": "array", "items": {"type": "string"}},
+                    "counter_evidence": {"type": "array", "items": {"type": "string"}},
+                    "verdict": {"type": "string", "enum": ["confirmed", "rejected", "unknown"]},
+                },
+            },
+        },
     },
     "required": ["status", "root_cause_category", "summary", "missing_control", "causal_chain", "confidence_score", "needs_human_review"],
 }
@@ -289,7 +329,7 @@ FAILURE_ANALYSIS_SCHEMA = {
     "properties": {
         "primary_category": {
             "type": "string",
-            "enum": ["build_failure", "business_regression", "security_not_fixed", "scanner_still_reports", "differential_risk", "patch_policy_violation", "tooling_gap", "unknown"],
+            "enum": ["build_failure", "test_harness_failure", "business_regression", "security_not_fixed", "scanner_still_reports", "differential_risk", "patch_policy_violation", "tooling_gap", "unknown"],
         },
         "summary": {"type": "string", "description": "失败原因一句话摘要"},
         "findings": {
@@ -310,6 +350,13 @@ FAILURE_ANALYSIS_SCHEMA = {
         "remediation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给修复方案 Agent 的反馈"},
         "patch_generation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给补丁生成 Agent 的反馈"},
         "validation_feedback": {"type": "array", "items": {"type": "string"}, "description": "给验证工具链的反馈"},
+        "route_to": {
+            "type": "string",
+            "enum": ["remediation_plan_agent", "root_cause_agent", "patch_generation_agent", "validation_toolchain", "human_review"],
+        },
+        "diagnostic_hypotheses": {"type": "array", "items": {"type": "string"}},
+        "reflection": {"type": "array", "items": {"type": "string"}},
+        "do_not_repeat": {"type": "array", "items": {"type": "string"}},
         "requires_root_cause_recheck": {"type": "boolean", "description": "是否需要重新检查根因"},
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string"},
@@ -347,6 +394,7 @@ REMEDIATION_PLAN_SCHEMA = {
                     "description": {"type": "string"},
                     "reason": {"type": "string"},
                     "risk_level": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "causally_required": {"type": "boolean", "description": "此文件是否被根因因果链直接命中，遗漏会导致漏洞仍然可达。source→sink 路径上的文件必须设为 true。"},
                 },
                 "required": ["file", "change_type", "description", "reason"],
             },
@@ -375,45 +423,118 @@ REMEDIATION_PLAN_SCHEMA = {
         "confidence_score": {"type": "number", "minimum": 0, "maximum": 1},
         "needs_human_review": {"type": "boolean"},
         "reasoning": {"type": "string"},
+        "candidate_rankings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "strategy": {"type": "string"},
+                    "causal_chain": {"type": "number"},
+                    "security_invariant": {"type": "number"},
+                    "compatibility": {"type": "number"},
+                    "verifiability": {"type": "number"},
+                    "change_risk": {"type": "number"},
+                    "weighted_score": {"type": "number"},
+                    "selected": {"type": "boolean"},
+                },
+            },
+        },
     },
     "required": ["status", "remediation_goal", "strategies", "planned_changes", "required_tests", "risk_points", "needs_human_review"],
 }
 
 
-# ── LLM Backend (DeepSeek via OpenAI SDK) ─────────────────────────────
+# ── LLM Backend (multi-provider via OpenAI SDK) ────────────────────────
 
-DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
+
+
+def _get_default_model() -> str:
+    """读取默认模型：LLM_MODEL > DEEPSEEK_MODEL（向后兼容）> DEFAULT_MODEL。"""
+    return os.environ.get("LLM_MODEL") or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
+
+
+# Provider configs — model name prefix determines provider
+_PROVIDER_CONFIG: dict[str, dict[str, str]] = {
+    "glm": {
+        "api_key_env": "GLM_API_KEY",
+        "base_url_env": "GLM_BASE_URL",
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4/",
+    },
+    "deepseek": {
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "default_base_url": "https://api.deepseek.com",
+    },
+}
+
+
+def _detect_provider(model: str) -> str:
+    """Detect provider from model name. Returns 'deepseek' or 'glm'."""
+    model_lower = model.lower()
+    if "glm" in model_lower:
+        return "glm"
+    return "deepseek"
+
+
+def _provider_credentials(model: str) -> tuple[str, str]:
+    """Return (api_key, base_url) for the given model's provider."""
+    provider = _detect_provider(model)
+    cfg = _PROVIDER_CONFIG[provider]
+    api_key = os.environ.get(cfg["api_key_env"], "")
+    base_url = os.environ.get(cfg["base_url_env"], "") or cfg["default_base_url"]
+    return api_key, base_url
+
+
+# ── ChatResponse ────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class ChatResponse:
+    """LLM 多轮对话响应 — Agent 循环的核心数据类型。"""
+    content: str | None
+    tool_calls: list[dict[str, Any]] | None
+    finish_reason: str | None
 
 
 @dataclass(slots=True)
 class LLMBackend:
-    """封装 DeepSeek API 调用（兼容 OpenAI SDK）。
+    """多 provider LLM 后端（兼容 OpenAI SDK）。
+
+    根据 model 名自动选择 provider：
+      - glm-5.2           → 智谱 GLM  API
+      - deepseek-v4-pro   → DeepSeek API
+      - deepseek-chat     → DeepSeek API
+      - deepseek-reasoner → DeepSeek API
 
     Usage:
-        llm = LLMBackend()                                # 从环境变量读 DEEPSEEK_API_KEY
-        llm = LLMBackend(model="deepseek-chat")           # 指定模型
-        llm = LLMBackend(api_key="sk-...", model="...")   # 显式传参
-
-        result = llm.reason("分析这个SQL注入漏洞的影响面...",
-                            output_schema=IMPACT_SCHEMA)
+        llm = LLMBackend()                       # 从环境变量读
+        llm = LLMBackend(model="glm-5.2")        # 指定模型
+        llm = LLMBackend(model="deepseek-chat")  # 自动切到 DeepSeek
     """
 
     model: str = DEFAULT_MODEL
-    api_key: str | None = field(default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY"))
-    base_url: str = DEFAULT_BASE_URL
+    api_key: str | None = None
+    base_url: str = ""
     max_tokens: int = 16384
+    request_timeout_seconds: float = 120.0
 
     def __post_init__(self):
-        # 允许通过环境变量覆盖 base_url 和 model
-        if not self.api_key:
-            self.api_key = os.environ.get("DEEPSEEK_API_KEY")
-        env_base = os.environ.get("DEEPSEEK_BASE_URL")
-        if env_base:
-            self.base_url = env_base
-        env_model = os.environ.get("DEEPSEEK_MODEL")
-        if env_model:
+        # 环境变量兜底 model（LLM_MODEL 优先，DEEPSEEK_MODEL 向后兼容）
+        env_model = _get_default_model()
+        if env_model and self.model == DEFAULT_MODEL:
             self.model = env_model
+
+        # 根据 model 自动选择 provider 的 api_key / base_url
+        key, url = _provider_credentials(self.model)
+        if not self.api_key:
+            self.api_key = key
+        if not self.base_url:
+            self.base_url = url
+
+        env_timeout = os.environ.get("DEEPSEEK_TIMEOUT_SECONDS")
+        if env_timeout:
+            self.request_timeout_seconds = float(env_timeout)
 
     def reason(
         self,
@@ -422,6 +543,7 @@ class LLMBackend:
         system_prompt: str = "",
         output_schema: dict[str, Any] | None = None,
         temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> dict[str, Any] | str:
         """调用 DeepSeek 进行推理。
 
@@ -445,7 +567,12 @@ class LLMBackend:
                 "需要安装 openai SDK：pip install openai"
             )
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.request_timeout_seconds,
+            max_retries=1,
+        )
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -453,17 +580,86 @@ class LLMBackend:
         messages.append({"role": "user", "content": user_prompt})
 
         if output_schema:
-            return self._structured_call(client, messages, output_schema, temperature)
+            return self._structured_call(client, messages, output_schema, temperature, max_tokens)
 
         # 非结构化调用
         response = client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
         )
         content = response.choices[0].message.content
         return content or ""
+
+    # ── 多轮对话接口（Agent 循环使用）──────────────────────────────────
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> "ChatResponse":
+        """多轮对话接口 — 支持工具调用的 Agent 推理循环。
+
+        Args:
+            messages: 完整对话历史（含 system/user/assistant/tool 角色）
+            tools: 可用的工具定义列表（OpenAI function calling 格式）
+            temperature: 推理温度
+
+        Returns:
+            ChatResponse: 包含 content、tool_calls、finish_reason
+        """
+        if not self.api_key:
+            raise RuntimeError("未设置 DEEPSEEK_API_KEY 环境变量，无法调用 LLM。")
+
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("需要安装 openai SDK：pip install openai")
+
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.request_timeout_seconds,
+            max_retries=1,
+        )
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        response = client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+        finish = response.choices[0].finish_reason
+
+        # 提取 tool_calls
+        raw_tool_calls: list[dict[str, Any]] | None = None
+        if msg.tool_calls:
+            raw_tool_calls = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+
+        return ChatResponse(
+            content=msg.content,
+            tool_calls=raw_tool_calls,
+            finish_reason=finish,
+        )
 
     def _structured_call(
         self,
@@ -471,6 +667,7 @@ class LLMBackend:
         messages: list[dict[str, str]],
         schema: dict[str, Any],
         temperature: float,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """使用 OpenAI function calling 实现结构化输出。
 
@@ -497,7 +694,7 @@ class LLMBackend:
             response = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens or self.max_tokens,
                 temperature=temperature,
                 tools=[{"type": "function", "function": function_def}],
             )
@@ -511,21 +708,40 @@ class LLMBackend:
         if msg.tool_calls:
             tool_args_raw = msg.tool_calls[0].function.arguments
             try:
-                return json.loads(tool_args_raw)
+                parsed = json.loads(tool_args_raw)
             except (json.JSONDecodeError, AttributeError):
-                # JSON 可能被截断 — 尝试修复（补全末尾的 }]})
-                fixed = self._try_fix_truncated_json(tool_args_raw)
-                if fixed is not None:
+                parsed = None
+
+            if parsed is None:
+                # JSON 可能被截断 — 使用 robust repair 模块
+                from .json_repair import repair_json
+                parsed = repair_json(tool_args_raw)
+                if parsed is not None:
                     print(f"[LLM] JSON 被截断，已自动修复")
-                    return fixed
-                # 无法修复 → 返回 raw string 触发 fallback
-                return tool_args_raw
+
+            if isinstance(parsed, dict):
+                # ── 校验 output_schema 必需字段 ──
+                missing = _validate_schema_required(parsed, schema)
+                if missing:
+                    print(f"[LLM] JSON 缺少必需字段: {missing}，仍返回但标记 _schema_missing")
+                    parsed["_schema_missing"] = list(missing)
+                return parsed
+
+            # 无法修复 → 返回 raw string 触发 fallback
+            return tool_args_raw
 
         # Fallback: 从文本内容中解析 JSON
         if msg.content:
             text = msg.content
             try:
                 parsed = self._extract_json_from_text(text)
+                if isinstance(parsed, dict):
+                    # ── 校验 output_schema 必需字段 ──
+                    missing = _validate_schema_required(parsed, schema)
+                    if missing:
+                        print(f"[LLM] 文本提取 JSON 缺少必需字段: {missing}")
+                        parsed["_schema_missing"] = list(missing)
+                    return parsed
                 if parsed is not None:
                     return parsed
             except (json.JSONDecodeError, ValueError):
@@ -548,67 +764,47 @@ class LLMBackend:
 
     @staticmethod
     def _extract_json_from_text(text: str) -> dict[str, Any] | None:
-        """从文本中提取 JSON 对象。"""
+        """从文本中提取 JSON 对象，尝试 repair 回退。"""
+        from .json_repair import repair_json
+
         if "```json" in text:
             start = text.index("```json") + 7
             end = text.index("```", start)
-            return json.loads(text[start:end])
-        elif "{" in text:
+            block = text[start:end]
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                repaired = repair_json(block)
+                if repaired is not None:
+                    return repaired
+        if "{" in text:
             start = text.index("{")
             end = text.rindex("}") + 1
-            return json.loads(text[start:end])
+            block = text[start:end]
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                repaired = repair_json(block)
+                if repaired is not None:
+                    return repaired
         return None
-
-    @staticmethod
-    def _try_fix_truncated_json(raw: str) -> dict[str, Any] | None:
-        """尝试修复被截断的 JSON — 补全缺失的括号和引号。"""
-        if not raw or not raw.startswith("{"):
-            return None
-        # 统计未配对的括号
-        depth = 0
-        in_string = False
-        escaped = False
-        for ch in raw:
-            if escaped:
-                escaped = False
-                continue
-            if ch == "\\":
-                escaped = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-            elif not in_string:
-                if ch in "{[":
-                    depth += 1
-                elif ch in "}]":
-                    depth -= 1
-        if depth <= 0:
-            return None
-        # 如果在字符串内，先闭合字符串
-        fixed = raw
-        if in_string:
-            fixed += '"'
-        # 补全缺失的括号
-        # 简单策略：补齐 }]})
-        fixed += "}]}"[:depth] if depth <= 3 else "}" * depth
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            return None
-
 
 # ── 便捷函数 ──────────────────────────────────────────────────────────
 
 def create_llm_backend(model: str | None = None) -> LLMBackend | None:
-    """如果 DEEPSEEK_API_KEY 已设置，返回 LLMBackend；否则返回 None。
+    """如果任一 provider 的 API Key 已设置，返回 LLMBackend；否则返回 None。
+
+    根据 model 名自动选择 provider：
+      - glm-5.2           → GLM_API_KEY + GLM_BASE_URL
+      - deepseek-*        → DEEPSEEK_API_KEY + DEEPSEEK_BASE_URL
 
     用法:
         llm = create_llm_backend()
+        llm = create_llm_backend(model="glm-5.2")
         agent = ImpactAnalysisAgent(..., llm=llm)
     """
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+    selected_model = model or _get_default_model()
+    key, _ = _provider_credentials(selected_model)
+    if not key:
         return None
-    return LLMBackend(
-        model=model or os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL),
-    )
+    return LLMBackend(model=selected_model)

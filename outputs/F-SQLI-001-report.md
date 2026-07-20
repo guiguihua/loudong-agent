@@ -1,7 +1,7 @@
 # 修复 SQL Injection（F-SQLI-001）
 
 ## 修改摘要
-候选补丁 patch-F-SQLI-001-001 已针对 SQL Injection 完成修复，并通过构建、业务回归、安全回归、扫描复验和差异风险验证。
+候选补丁 patch-F-SQLI-001-001 已针对 SQL Injection 生成，并在隔离的临时工作区通过全部适用验证。补丁未写入或合并到原始代码仓库，需由人工审查后决定是否采用。
 
 ## 漏洞信息
 - 漏洞 ID：F-SQLI-001
@@ -10,94 +10,196 @@
 - 来源工具：SAST
 - 受影响服务：customer-service
 
+## 影响面
+**证据等级**：状态 `possible`，置信度 0.30。以下列表仅应包含已由当前仓库、资产或运行时上下文支持的项目；潜在范围列在不确定项中。
+
+**受影响服务/组件**：
+- customer-service
+
+**调用路径**：
+1. 外部输入/请求 → search_users @ src/user/search.py:5 → SQL Injection 危险操作
+
+**受影响数据**：
+- 受影响数据（证据: user input 'keyword' from request.args.get('q') concatenated into SQL query — no parameterization）
+
+**建议回归测试**：
+- 验证 SQL Injection 的利用条件在修复后是否被阻断
+- 验证正常认证流程不受影响
+
+**不确定项**：
+- unverified entry point removed from confirmed impact: ANY SQL Injection 触发入口
+
 ## 漏洞根因
-**安全不变量**：任何最终进入 SQL 执行 API 的不可信输入，都必须作为绑定参数传入，不得参与 SQL 语句字符串拼接。
-
-**守卫/缺失控制**：`parameterized_query` 是本路径必须执行的安全守卫。
-
-**根因摘要**：search_users 的不可信数据未经 parameterized_query 到达 execute
-
-**破坏机制**：
-
-1. 入口：search_users 接收或保留不可信输入。
-2. 传播：search_users 发生 propagates untrusted input without sanitization。
-3. 缺失/失效安检：string concatenation，原因：user input concatenated into SQL bypasses parameterized query guard。
-4. 危险汇点：数据最终进入 execute。
-5. 触发条件：user input concatenated into SQL query。
-
-**因果链路**：不可信输入来自 search_users → search_users: propagates untrusted input without sanitization → 数据进入危险操作 execute
-
-**可利用性说明**：攻击者可通过构造 SQL 片段改变查询结构；修复应确保 payload 只作为参数值处理。
-
-**修复约束**：
-- 必须使用参数化查询或等价安全 API
-- 不得仅使用 SQL 字符黑名单
-- 必须保留原查询业务语义
-- 必须新增 SQL Injection 安全回归测试
+**根因摘要**：F-SQLI-001: SQL Injection — 受影响位置 src/user/search.py:5. 证据: user input 'keyword' from request.args.get('q') concatenated into SQL query — no parameterization
 
 ## 修复方案
-**修复目标**：阻断不可信输入进入 SQL 拼接执行路径，同时保持原查询语义
+**修复目标**：Replace SQL string construction with parameterized queries while preserving existing query semantics.
 
 **修改文件**：
-- `src/user/search.py`：replace SQL string concatenation with parameterized query（原因：search_users 的不可信数据未经 parameterized_query 到达 execute）
+- `src/user/search.py`：Replace SQL concatenation/interpolation with parameterized query execution.（原因：针对 SQL Injection 的安全控制（具体控制尚未从源码证据确认，需人工审查。））
 
-**修改策略**：使用参数化查询或等价安全 ORM API 替换字符串拼接 SQL
+**修改策略**：Use bound SQL parameters for every user-controlled value.
 
 **实施步骤**：
-1. 保留原查询条件语义
-2. 将用户输入作为绑定参数传入
-3. 覆盖恶意 SQL payload 和正常查询用例
+1. Locate the vulnerable SQL execution path.
+2. Move user-controlled values into driver placeholders instead of SQL text.
+3. Preserve existing filters, result shape, and error behavior.
+4. Add or run a SQL injection regression check before merging.
 
 **需要新增/保留的测试**：
-- business regression for API request：原有业务流程和接口契约保持不变
-- SQL Injection security regression：影响面相关安全或业务假设得到验证
-- sensitive data access regression：影响面相关安全或业务假设得到验证
-- scanner rescan：原始漏洞规则或同类规则不再命中
-- SQL Injection security regression：恶意 SQL payload 不会改变查询结构或执行额外语句
+- F-SQLI-001 SQL injection regression：malicious SQL payload is treated as data and cannot change query structure
+- F-SQLI-001 search behavior regression：normal queries keep the previous response shape and matching behavior
 
 **替代方案取舍**：
-- 不采用 `只对输入做 SQL 关键字黑名单过滤`：黑名单容易被编码、注释、大小写和数据库方言绕过
+- 不采用 `input blacklist only`：blacklists are bypass-prone and do not enforce the SQL parameterization invariant
 
 ## 修改文件列表
 - src/user/search.py
-- tests/test_security_regression_f_sqli_001.py
-- SECURITY_REMEDIATION.md
+- tests/test_user_search.py
+
+## 候选补丁
+### `src/user/search.py`
+
+Git-generated diff from verified structured edits
+
+```diff
+diff --git a/src/user/search.py b/src/user/search.py
+index 25d1f6f..cbb77e2 100644
+--- a/src/user/search.py
++++ b/src/user/search.py
+@@ -3,6 +3,6 @@ from flask import request
+
+ def search_users(cursor):
+     keyword = request.args.get("q", "")
+-    sql = "select * from users where name like '%" + keyword + "%'"
+-    cursor.execute(sql)
++    sql = "select * from users where name like %s"
++    cursor.execute(sql, (f"%{keyword}%",))
+     return cursor.fetchall()
+```
+
+### `tests/test_user_search.py`
+
+Git-generated diff from verified structured edits
+
+```diff
+diff --git a/tests/test_user_search.py b/tests/test_user_search.py
+index 339733b..ec38f0a 100644
+--- a/tests/test_user_search.py
++++ b/tests/test_user_search.py
+@@ -1,2 +1,34 @@
+ def test_search_users_returns_results():
+     assert True
++
++def test_search_users_uses_bound_parameters_for_attack_and_legitimate_input():
++    import importlib
++    from types import SimpleNamespace
++
++    module = importlib.import_module("src.user.search")
++
++    class RecordingCursor:
++        def execute(self, *args):
++            self.last_execute = args
++
++        def fetchall(self):
++            return []
++
++    original_request = module.request
++    try:
++        cursor = RecordingCursor()
++        attack = "' OR '1'='1"
++        module.request = SimpleNamespace(args={"q": attack})
++        module.search_users(cursor)
++        query, params = cursor.last_execute
++        assert attack not in query
++        assert attack in repr(params)
++
++        legitimate = "alice"
++        module.request = SimpleNamespace(args={"q": legitimate})
++        assert module.search_users(cursor) == []
++        query, params = cursor.last_execute
++        assert legitimate not in query
++        assert legitimate in repr(params)
++    finally:
++        module.request = original_request
+```
 
 ## 测试结果
 - 构建验证：通过 - build validation passed
--   - build：通过（构建验证通过。）
+-   - "C:\Python314\python.exe" -m compileall -q .：通过（build command completed）
+    命令: `"C:\Python314\python.exe" -m compileall -q .`；退出码: 0；耗时: 790 ms；证据:
+```text
+Unified diff applied successfully in the isolated workspace.
+Command completed without output.
+```
 - 业务回归验证：通过 - business_regression validation passed
--   - business regression：通过（业务回归测试通过。）
+-   - "C:\Python314\python.exe" -m pytest -q：通过（business_regression command completed）
+    命令: `"C:\Python314\python.exe" -m pytest -q`；退出码: 0；耗时: 10642 ms；证据:
+```text
+..                                                                       [100%]
+2 passed in 0.86s
+```
 
 ## 安全验证结果
 - 安全回归验证：通过 - security_regression validation passed
--   - security regression：通过（安全回归测试通过。）
-- 扫描复验：通过 - scanner_rescan validation passed
--   - scanner rescan：通过（扫描器复扫不再命中。）
+-   - "C:\Python314\python.exe" -m pytest -q "tests/test_user_search.py"：通过（security_regression command completed）
+    命令: `"C:\Python314\python.exe" -m pytest -q "tests/test_user_search.py"`；退出码: 0；耗时: 5706 ms；证据:
+```text
+..                                                                       [100%]
+2 passed in 0.32s
+```
 - 差异风险验证：通过 - differential_risk validation passed
--   - diff risk：通过（补丁差异风险可接受。）
+-   - candidate policy check：通过（candidate is within declared patch boundaries）
+    命令: `internal:patch-policy-check`；退出码: 0；证据:
+```text
+changed_files=2
+estimated_diff_lines=36
+allowed_files_only=True
+```
 
 ## 完整验证结果
 - 构建验证：通过
--   - build：通过（构建验证通过。）
+-   - "C:\Python314\python.exe" -m compileall -q .：通过（build command completed）
+    命令: `"C:\Python314\python.exe" -m compileall -q .`；退出码: 0；耗时: 790 ms；证据:
+```text
+Unified diff applied successfully in the isolated workspace.
+Command completed without output.
+```
 - 业务回归验证：通过
--   - business regression：通过（业务回归测试通过。）
+-   - "C:\Python314\python.exe" -m pytest -q：通过（business_regression command completed）
+    命令: `"C:\Python314\python.exe" -m pytest -q`；退出码: 0；耗时: 10642 ms；证据:
+```text
+..                                                                       [100%]
+2 passed in 0.86s
+```
 - 安全回归验证：通过
--   - security regression：通过（安全回归测试通过。）
-- 扫描复验：通过
--   - scanner rescan：通过（扫描器复扫不再命中。）
+-   - "C:\Python314\python.exe" -m pytest -q "tests/test_user_search.py"：通过（security_regression command completed）
+    命令: `"C:\Python314\python.exe" -m pytest -q "tests/test_user_search.py"`；退出码: 0；耗时: 5706 ms；证据:
+```text
+..                                                                       [100%]
+2 passed in 0.32s
+```
 - 差异风险验证：通过
--   - diff risk：通过（补丁差异风险可接受。）
+-   - candidate policy check：通过（candidate is within declared patch boundaries）
+    命令: `internal:patch-policy-check`；退出码: 0；证据:
+```text
+changed_files=2
+estimated_diff_lines=36
+allowed_files_only=True
+```
 
 ## 风险说明
-- 修复可能改变输入处理、输出格式或错误返回行为
-- 如果仅在局部位置修复，其他同类调用点仍可能残留风险
+- LIKE wildcard semantics must remain compatible after parameter binding
+- existing tests may be absent, so generated patch still needs human review
+- Root-cause confidence is below 0.70; patch placement requires explicit human review.
+- 根因置信度 < 0.45: source/sink 未确认，修复范围已自动扩大。需要人工确认实际修复目标文件。
+- 影响面置信度仅为 0.30；未确认的服务、入口和调用路径仍需人工核实。
+- 根因置信度仅为 0.30；补丁位置和安全不变量仍需人工复核。
 
 ## 回滚方案
-回滚本次代码和测试变更，恢复到修复前提交
-- revert remediation commit
-- 重新运行构建与核心回归测试
-- 确认漏洞工单恢复为待修复状态
+Revert the generated code or manifest changes and rerun validation.
+- revert patch
+- rerun build and security checks
 
 ## 人工审查重点
 - 确认补丁与修复目标一致，且没有绕过验证或削弱安全控制。

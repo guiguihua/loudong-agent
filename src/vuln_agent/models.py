@@ -105,6 +105,7 @@ class ToolExecutionStatus(StrEnum):
 
 class FailureCategory(StrEnum):
     BUILD_FAILURE = "build_failure"
+    TEST_HARNESS_FAILURE = "test_harness_failure"
     BUSINESS_REGRESSION = "business_regression"
     SECURITY_NOT_FIXED = "security_not_fixed"
     SCANNER_STILL_REPORTS = "scanner_still_reports"
@@ -125,11 +126,13 @@ class RemediationFeedbackTarget(StrEnum):
     REMEDIATION_PLAN_AGENT = "remediation_plan_agent"
     ROOT_CAUSE_AGENT = "root_cause_agent"
     PATCH_GENERATION_AGENT = "patch_generation_agent"
+    VALIDATION_TOOLCHAIN = "validation_toolchain"
     HUMAN_REVIEW = "human_review"
 
 
 class RemediationReportStatus(StrEnum):
     READY = "ready"
+    CANDIDATE = "candidate"
     BLOCKED = "blocked"
 
 
@@ -298,6 +301,10 @@ class EngineeringContext:
     package_manager: str | None = None
     dependency_versions: dict[str, str] = field(default_factory=dict)
     available_test_commands: list[str] = field(default_factory=list)
+    available_security_commands: list[str] = field(default_factory=list)
+    available_poc_commands: list[str] = field(default_factory=list)
+    available_build_commands: list[str] = field(default_factory=list)
+    available_scanner_commands: list[str] = field(default_factory=list)
     related_tests: list[str] = field(default_factory=list)
     deployment_targets: list[str] = field(default_factory=list)
 
@@ -319,6 +326,7 @@ class PlannedChange:
     description: str
     reason: str
     risk_level: Severity = Severity.MEDIUM
+    causally_required: bool = False  # True: 因果必需文件，补丁不可遗漏
 
 
 @dataclass(slots=True)
@@ -416,6 +424,113 @@ class SourceFile:
 
 
 @dataclass(slots=True)
+class RepositorySummary:
+    repository: str | None
+    revision: str | None
+    file_count: int
+    languages: list[str] = field(default_factory=list)
+    frameworks: list[str] = field(default_factory=list)
+    manifests: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class FileEvidence:
+    path: str
+    matched_by: str
+    line_count: int
+    sha256: str
+    language: str | None = None
+
+
+@dataclass(slots=True)
+class CodeSlice:
+    slice_id: str
+    path: str
+    start_line: int
+    end_line: int
+    content: str
+    reason: str
+
+
+@dataclass(slots=True)
+class EntryPointEvidence:
+    route: str
+    method: str
+    path: str
+    line: int
+    framework: str | None = None
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class CodePointEvidence:
+    symbol: str
+    path: str
+    line: int
+    kind: str
+    pattern: str
+    reason: str
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class DependencyEvidence:
+    component: str
+    version: str | None
+    path: str | None
+    line: int | None
+    source: str
+
+
+@dataclass(slots=True)
+class TestEvidence:
+    path: str | None
+    framework: str | None
+    command: str | None
+    related: bool
+    snippet_id: str | None = None
+
+
+@dataclass(slots=True)
+class ConfigEvidence:
+    path: str
+    key: str
+    line: int | None
+    value: str
+    source: str
+
+
+@dataclass(slots=True)
+class ValidationCapabilities:
+    build_commands: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    security_commands: list[str] = field(default_factory=list)
+    poc_commands: list[str] = field(default_factory=list)
+    scanner_commands: list[str] = field(default_factory=list)
+    detected_tools: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class EvidenceBundle:
+    finding_id: str
+    repository_summary: RepositorySummary
+    target_files: list[FileEvidence]
+    code_slices: list[CodeSlice]
+    entry_points: list[EntryPointEvidence]
+    source_candidates: list[CodePointEvidence]
+    sink_candidates: list[CodePointEvidence]
+    dependency_evidence: list[DependencyEvidence]
+    test_evidence: list[TestEvidence]
+    config_evidence: list[ConfigEvidence]
+    validation_capabilities: ValidationCapabilities
+    collection_warnings: list[str]
+    bundle_hash: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class PatchGenerationPolicy:
     mode: str = "diff_only"
     allow_file_create: bool = True
@@ -438,6 +553,10 @@ class PreviousPatchAttempt:
     patch_id: str
     validation_status: PatchValidationStatus
     failures: list[VerificationFailure] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
+    prohibited_repeats: list[str] = field(default_factory=list)
+    route_to: RemediationFeedbackTarget | None = None
+    artifacts: list["PatchArtifact"] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -446,6 +565,8 @@ class PatchArtifact:
     target: str
     content: str
     description: str
+    needs_manual_fix: bool = False
+    fix_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -489,6 +610,7 @@ class PatchCandidate:
     policy_check: PatchPolicyCheck
     blocked_reason: str | None = None
     needs_human_review: bool = True
+    repair_session: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -576,6 +698,9 @@ class FailureAnalysisResult:
     validation_feedback: list[str]
     requires_root_cause_recheck: bool
     needs_human_review: bool
+    diagnostic_hypotheses: list[str] = field(default_factory=list)
+    reflection: list[str] = field(default_factory=list)
+    do_not_repeat: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

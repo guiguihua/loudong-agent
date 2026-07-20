@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-07-09T09:40:28Z",
+  "total_cases": 1,
+  "modes": [
+    "llm"
+  ],
+  "summary": {
+    "llm": {
+      "total": 1,
+      "succeeded": 1,
+      "exhausted": 0,
+      "errors": 0,
+      "success_rate": 100.0,
+      "avg_time_ms": 157634.0,
+      "min_time_ms": 157634.0,
+      "max_time_ms": 157634.0
+    }
+  },
+  "cases": [
+    {
+      "case_id": "demo-code-sqli-llm",
+      "category": "demo",
+      "mode": "llm",
+      "description": "SQL 注入 - 代码修复 (Flask) [llm]",
+      "status": "succeeded",
+      "total_time_ms": 157634.0,
+      "error_message": null,
+      "field_completeness": {
+        "finding": "7/7",
+        "impact": "15/15",
+        "root_cause": "15/15",
+        "report": "19/19",
+        "patch_candidate": "13/14",
+        "patch_validation": "8/9",
+        "failure_analysis": "0/11 (missing section)"
+      },
+      "patch_artifact_count": 5,
+      "patch_changed_files_count": 4,
+      "patch_diff_lines": 19,
+      "attempt_count": 1,
+      "llm_fallback_count": 0
+    }
+  ],
+  "edge_cases": [],
+  "comparison": {}
+}

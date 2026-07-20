@@ -1,0 +1,113 @@
+{
+  "e4e97c598824": {
+    "id": "e4e97c598824",
+    "name": "authentication",
+    "provider": "local",
+    "url": "https://github.com/guiguihua/loudong-agent.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\authentication",
+    "git_root": "E:\\damoxingdaima\\loudong-agent",
+    "default_branch": "master",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "3ee55aa95521",
+      "last_indexed_at": "2026-07-10 10:52",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  },
+  "25fae10f1b82": {
+    "id": "25fae10f1b82",
+    "name": "airflow-2.8.0",
+    "provider": "local",
+    "url": "https://github.com/apache/airflow.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\deserialization\\airflow-2.8.0",
+    "git_root": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\deserialization\\airflow-2.8.0",
+    "default_branch": "HEAD",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "db2b75c233e3",
+      "last_indexed_at": "2026-07-14 16:43",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  },
+  "10fc17624074": {
+    "id": "10fc17624074",
+    "name": "filelock-3.20.0",
+    "provider": "local",
+    "url": "https://github.com/tox-dev/filelock.git",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\race-condition\\filelock-3.20.0",
+    "git_root": "E:\\damoxingdaima\\loudong-agent\\validation-coverage\\race-condition\\filelock-3.20.0",
+    "default_branch": "HEAD",
+    "auth_mode": "local",
+    "source_mode": "filesystem",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "f7c3f8ea7def",
+      "last_indexed_at": "2026-07-14 16:51",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  },
+  "24e399d3bfbb": {
+    "id": "24e399d3bfbb",
+    "name": "loudong-agent",
+    "provider": "github",
+    "url": "https://github.com/guiguihua/loudong-agent",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\.data\\repos\\24e399d3bfbb",
+    "default_branch": "master",
+    "auth_mode": "none",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "f4cd850e5dd5",
+      "last_indexed_at": "2026-07-15 09:37",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  },
+  "6d440c27c830": {
+    "id": "6d440c27c830",
+    "name": "app-demo",
+    "provider": "github",
+    "url": "https://github.com/guiguihua/app-demo",
+    "local_path": "E:\\damoxingdaima\\loudong-agent\\.data\\repos\\6d440c27c830",
+    "default_branch": "main",
+    "auth_mode": "none",
+    "permissions": {
+      "read": true,
+      "write_branch": false,
+      "create_pr": false
+    },
+    "index_status": {
+      "last_indexed_commit": "d0fe3e091493",
+      "last_indexed_at": "2026-07-15 10:06",
+      "file_index_ready": true,
+      "dependency_index_ready": false,
+      "semantic_index_ready": false
+    }
+  }
+}

@@ -1,0 +1,847 @@
+{
+  "finding": {
+    "schema_version": "1.0",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "vulnerability_type": "Vulnerable Dependency",
+    "severity": "high",
+    "confidence": "high",
+    "scanner": "validation-coverage",
+    "locations": [
+      {
+        "file": "requirements.txt",
+        "function": null,
+        "line": null
+      },
+      {
+        "file": "pyproject.toml",
+        "function": null,
+        "line": null
+      }
+    ],
+    "evidence": [
+      "本地样例目录存在 vulnerable 版本：validation-coverage\\sql-injection\\django-5.0.6",
+      "本地样例目录存在 upstream fixed 版本：validation-coverage\\upstream-fixed\\django-5.0.8",
+      "安全回归测试包含 SQL 注入用例：tests/db_functions/datetime/test_extract_trunc.py"
+    ],
+    "recommendation": "将 Django 从 5.0.6 升级到 5.0.8，并保留 Extract/Trunc lookup_name SQL 注入回归测试。",
+    "cve": null,
+    "cwe": null,
+    "repository": "validation-coverage\\sql-injection\\django-5.0.6",
+    "revision": null,
+    "dependency": {
+      "component": "django",
+      "current_version": "5.0.6",
+      "fixed_versions": [
+        "5.0.8"
+      ],
+      "breaking_upgrade": false,
+      "usage_locations": [
+        {
+          "file": "requirements.txt",
+          "function": null,
+          "line": null
+        },
+        {
+          "file": "pyproject.toml",
+          "function": null,
+          "line": null
+        }
+      ],
+      "affected_artifacts": [
+        "validation-coverage\\sql-injection\\django-5.0.6"
+      ]
+    },
+    "raw_reference": "validation-coverage/sql-injection/django-5.0.6",
+    "normalization_warnings": []
+  },
+  "impact": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "possible",
+    "affected_services": [
+      "validation-coverage\\sql-injection\\django-5.0.6"
+    ],
+    "entry_points": [],
+    "call_paths": [],
+    "affected_assets": [
+      "validation-coverage\\sql-injection\\django-5.0.6:default"
+    ],
+    "affected_artifacts": [
+      "requirements.txt",
+      "pyproject.toml"
+    ],
+    "data_classification": [],
+    "upstream_dependencies": [
+      "django==5.0.6"
+    ],
+    "downstream_dependencies": [],
+    "regression_targets": [
+      "tests/db_functions/datetime/test_extract_trunc.py"
+    ],
+    "suggested_tests": [
+      "升级至 Django 5.0.8 后运行 Extract/Trunc lookup_name SQL 注入回归测试",
+      "使用 osv-scanner --recursive . 验证升级后无残留脆弱依赖"
+    ],
+    "evidence": [
+      {
+        "evidence_id": "llm-impact",
+        "source": "agent_reasoning",
+        "assertion": "Agent 探索代码后推理的影响面评估",
+        "value": "Django 5.0.6 脆弱依赖在 requirements.txt 和 pyproject.toml 中双清单确认存在，受影响资产明确。工具调查进一步确认：search_code 搜索 Extract|Trunc|lookup_name 无结果，证明仓库内无应用代码调用这些危险函数。仓库仅包含2个依赖清单文件(file_count=2)，无入口点(entry_points为空)、无 sink 候选(sink_candidates为空)、无 source 候选(source_candidates为空)。已知上下文中的调用路径为推测性，无代码切片支持。因此仅能确认'脆弱依赖存在于资产中'这一要素，缺乏代码路径和运行时证据，无法证明漏洞可被实际触发。状态判定为 possible。建议人工审查：1) 确认该仓库是否为纯依赖样例项目(如是则仅需升级依赖)；2) 若有下游应用使用此仓库的 Django 5.0.6，需检查是否调用了 Extract/Trunc 的 lookup_name 参数。",
+        "confidence": "medium"
+      }
+    ],
+    "unknowns": [
+      "仓库仅含2个依赖清单文件(requirements.txt, pyproject.toml)，无任何应用代码，无法确认 Extract/Trunc lookup_name 功能是否被实际调用",
+      "无入口点证据：entry_points 为空，无法确认是否存在可触达漏洞的 API 路由",
+      "无 sink 证据：sink_candidates 为空，无法确认 SQL 注入危险操作点是否存在",
+      "无运行时路径证据：无法确认该仓库是否实际部署运行",
+      "已知上下文中的调用路径 ['API request', 'unknown in requirements.txt', 'sink'] 为推测性路径，无代码切片支持",
+      "finding 描述提及的回归测试 tests/db_functions/datetime/test_extract_trunc.py 不在当前仓库内，属于上游 Django 项目测试，当前仓库是否包含该测试用例未知",
+      "test_evidence 中 pytest 命令标记为 related=false，与当前漏洞的关联性未确认",
+      "search_code 在当前工作目录未找到任何 Django 相关代码，目标仓库文件可能不在当前工作目录下"
+    ],
+    "confidence_score": 0.4,
+    "needs_human_review": true
+  },
+  "root_cause": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "probable",
+    "root_cause_category": "vulnerable_dependency",
+    "root_cause": {
+      "summary": "应用通过 requirements.txt 和 pyproject.toml 固定了 Django==5.0.6，该版本的 Extract/Trunc 数据库函数未对 lookup_name 参数进行白名单校验，导致用户可控的 lookup_name 被直接拼接到 SQL 查询中造成 SQL 注入；Django 5.0.8 修复了此问题。",
+      "source": null,
+      "propagation": [
+        {
+          "symbol": "Extract.__init__ / Trunc.__init__",
+          "operation": "lookup_name 参数被存储在函数实例上作为 SQL 模板填充值"
+        },
+        {
+          "symbol": "Extract.as_sql / Trunc.as_sql",
+          "operation": "lookup_name 被直接插入到 SQL 模板字符串中，未经过白名单校验或参数化处理"
+        },
+        {
+          "symbol": "database cursor execute",
+          "operation": "包含注入片段的 SQL 字符串被发送到数据库引擎执行"
+        }
+      ],
+      "sink": null,
+      "missing_control": "lookup_name whitelist validation — Extract/Trunc 函数必须验证 lookup_name 仅包含预定义的合法 SQL 日期/时间提取标识符（如 year, month, day, hour 等），拒绝任何不在白名单中的值",
+      "failed_existing_controls": [],
+      "trigger_conditions": [
+        "应用代码将用户可控输入作为 lookup_name 传递给 Extract() 或 Trunc() 构造函数",
+        "应用使用 Django 5.0.6（或更早的受影响版本）",
+        "攻击者能够控制到达 Extract/Trunc lookup_name 参数的输入路径（例如通过 API 参数、表单字段或查询字符串）"
+      ]
+    },
+    "contributing_factors": [
+      "应用固定了精确版本 Django==5.0.6 而非使用兼容范围，阻止了自动获取安全补丁",
+      "Django 5.0.6 的 Extract/Trunc 函数未将 lookup_name 视为不可信数据，缺少输入校验层",
+      "SQL 标识符（如函数名、提取字段名）无法通过参数化查询保护，必须依赖白名单校验——这是该漏洞的根本技术原因"
+    ],
+    "causal_chain": [
+      "1. 应用在 requirements.txt (line 1) 和 pyproject.toml (line 1) 中固定 Django==5.0.6，引入了包含 SQL 注入漏洞的依赖",
+      "2. Django 5.0.6 的 Extract/Trunc 函数接受任意字符串作为 lookup_name 参数，无白名单校验",
+      "3. lookup_name 值在 as_sql() 方法中被直接拼接到 SQL 查询模板字符串中，未经过参数化",
+      "4. 如果应用将用户可控数据传递给 lookup_name，攻击者可构造恶意字符串注入 SQL 片段",
+      "5. 包含注入片段的 SQL 被数据库引擎执行，导致数据泄露或篡改",
+      "6. Django 5.0.8 修复了此问题，添加了 lookup_name 白名单校验"
+    ],
+    "affected_code": [
+      {
+        "file": "pyproject.toml",
+        "function": null,
+        "lines": [
+          1
+        ],
+        "role": "dependency manifest pinning vulnerable Django 5.0.6"
+      },
+      {
+        "file": "requirements.txt",
+        "function": null,
+        "lines": [
+          1
+        ],
+        "role": "dependency manifest pinning vulnerable Django 5.0.6"
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "llm-root-cause",
+        "source": "agent_reasoning",
+        "assertion": "Agent 探索代码后推理的根因分析",
+        "value": "仓库仅包含两个依赖清单文件（requirements.txt: Django==5.0.6 和 pyproject.toml: dependencies=[\"Django==5.0.6\"]），无应用源码或 Django 库源码。漏洞类型为 Vulnerable Dependency，证据指向 Django 5.0.6 的 Extract/Trunc lookup_name SQL 注入问题（CVE-2024-42005）。Django 5.0.8 添加了 lookup_name 白名单校验修复此问题。由于 SQL 标识符无法通过参数化查询保护，白名单校验是唯一正确的防御措施。根因确认为：应用固定了含已知 SQL 注入漏洞的 Django 版本，且该漏洞的修复（白名单校验）在 5.0.8 中才引入。置信度 0.78 反映了依赖证据确凿但无法直接审查漏洞代码的限制。",
+        "confidence": "medium"
+      }
+    ],
+    "alternative_hypotheses": [
+      {
+        "hypothesis": "漏洞可能存在于 Django 5.0.6 的其他组件中，而非 Extract/Trunc 函数",
+        "result": "rejected",
+        "reason": "测试证据明确指向 tests/db_functions/datetime/test_extract_trunc.py，且漏洞建议提及 Extract/Trunc lookup_name SQL 注入回归测试"
+      },
+      {
+        "hypothesis": "应用代码本身存在 SQL 注入，与 Django 依赖无关",
+        "result": "rejected",
+        "reason": "仓库仅包含 2 个依赖清单文件（requirements.txt 和 pyproject.toml），无应用源码；漏洞类型明确为 Vulnerable Dependency"
+      },
+      {
+        "hypothesis": "漏洞可通过应用层输入校验缓解而无需升级 Django",
+        "result": "unresolved",
+        "reason": "理论上应用可在传递 lookup_name 给 Extract/Trunc 前自行校验，但仓库中无应用源码，无法确认是否已存在此类校验；依赖层修复是更可靠的方案"
+      }
+    ],
+    "confidence_score": 0.35,
+    "unknowns": [
+      "Django 5.0.6 中 Extract/Trunc 的具体源码行号——仓库不包含 Django 包源码",
+      "应用是否存在将用户可控输入传递给 lookup_name 的实际代码路径——仓库中无应用源码",
+      "应用是否已有应用层 lookup_name 校验——无法从依赖清单中判断",
+      "具体的 SQL 模板拼接方式（% 格式化、.format() 或 template string）——需要查看 Django 5.0.6 源码确认",
+      "攻击者实际可达的入口点——entry_points 为空，无法确认攻击面",
+      "unverified source location removed: django/db/models/functions/datetime.py (Django package, not in repository):Extract/Trunc lookup_name parameter (Django 5.0.6 internal)",
+      "unverified sink location removed: django/db/models/functions/datetime.py (Django package, not in repository):SQL query execution via Django ORM cursor (Django 5.0.6 internal)",
+      "root_cause_has_unknowns: both source and sink unverified — downstream agents must widen scope and verify each candidate file",
+      "multi_file_causal_chain: 2 files in source→sink→affected_code chain — remediation must cover all"
+    ],
+    "needs_human_review": true,
+    "recommended_fix_constraints": [
+      "将 Django 从 5.0.6 升级到 5.0.8 或更高版本，以获取 lookup_name 白名单校验修复",
+      "升级后保留 tests/db_functions/datetime/test_extract_trunc.py 中的 SQL 注入回归测试，确保修复持续有效",
+      "审计应用代码中所有使用 Extract/Trunc 的位置，确认不存在将用户可控输入直接传递给 lookup_name 的模式",
+      "考虑使用 ~= 版本约束而非 == 精确固定，以便在主版本内自动获取安全补丁"
+    ],
+    "security_invariant": "SQL 查询结构必须与用户数据严格分离。对于无法参数化的 SQL 标识符（如 lookup_name），必须通过白名单校验确保其仅包含预定义的合法值，绝不允许用户可控的任意字符串进入 SQL 查询模板。",
+    "guardrail": "Extract/Trunc 的 lookup_name 参数在进入 SQL 模板拼接之前，必须通过白名单校验，确认其值属于预定义的合法日期/时间提取标识符集合。",
+    "broken_mechanism": [
+      "入口：应用将用户可控的 lookup_name 传递给 Django ORM 的 Extract() 或 Trunc() 构造函数",
+      "传播：lookup_name 被存储在函数实例上，随后在 as_sql() 中用于填充 SQL 模板",
+      "缺失安检：Django 5.0.6 未对 lookup_name 执行白名单校验，任意字符串均可通过",
+      "汇点：拼接后的 SQL 字符串（含注入片段）被发送到数据库引擎执行",
+      "触发条件：应用使用 Django 5.0.6 且存在将用户输入传递到 lookup_name 的代码路径"
+    ],
+    "exploitability_note": "可利用性取决于应用是否存在将用户可控输入传递给 Extract/Trunc lookup_name 的代码路径。如果应用仅使用硬编码的 lookup_name（如 Extract('year')），则实际风险较低。但如果应用根据用户请求动态选择提取字段（如 API 参数指定 extract_type=year），则攻击者可通过注入恶意 lookup_name 值执行任意 SQL。由于仓库中不包含应用源码，无法确认实际可利用性。"
+  },
+  "evidence_bundle": {
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "repository_summary": {
+      "repository": "validation-coverage\\sql-injection\\django-5.0.6",
+      "revision": null,
+      "file_count": 2,
+      "languages": [
+        "Python"
+      ],
+      "frameworks": [
+        "Django"
+      ],
+      "manifests": [
+        "pyproject.toml",
+        "requirements.txt"
+      ]
+    },
+    "target_files": [
+      {
+        "path": "requirements.txt",
+        "matched_by": "exact_path",
+        "line_count": 1,
+        "sha256": "d3a424c785fae6a4ad2085fc73f8387f68ecdb625292acdaa74e503ffd99bdc6",
+        "language": null
+      },
+      {
+        "path": "pyproject.toml",
+        "matched_by": "exact_path",
+        "line_count": 1,
+        "sha256": "122cae4bee4da918b1a6f30c904d32b0a00d441adaf073be8bbe359344e4e83d",
+        "language": null
+      }
+    ],
+    "code_slices": [
+      {
+        "slice_id": "slice-001",
+        "path": "requirements.txt",
+        "start_line": 1,
+        "end_line": 1,
+        "content": "Django==5.0.6",
+        "reason": "finding target: requirements.txt"
+      },
+      {
+        "slice_id": "slice-002",
+        "path": "pyproject.toml",
+        "start_line": 1,
+        "end_line": 1,
+        "content": "dependencies = [\"Django==5.0.6\"]",
+        "reason": "finding target: pyproject.toml"
+      }
+    ],
+    "entry_points": [],
+    "source_candidates": [],
+    "sink_candidates": [],
+    "dependency_evidence": [
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": null,
+        "line": null,
+        "source": "normalized_finding"
+      },
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": "pyproject.toml",
+        "line": 1,
+        "source": "manifest"
+      },
+      {
+        "component": "django",
+        "version": "5.0.6",
+        "path": "requirements.txt",
+        "line": 1,
+        "source": "manifest"
+      }
+    ],
+    "test_evidence": [
+      {
+        "path": null,
+        "framework": null,
+        "command": "python -m pytest",
+        "related": false,
+        "snippet_id": null
+      }
+    ],
+    "config_evidence": [
+      {
+        "path": "pyproject.toml",
+        "key": "dependency_manifest",
+        "line": null,
+        "value": "present",
+        "source": "repository"
+      },
+      {
+        "path": "requirements.txt",
+        "key": "dependency_manifest",
+        "line": null,
+        "value": "present",
+        "source": "repository"
+      }
+    ],
+    "validation_capabilities": {
+      "build_commands": [
+        "python -m compileall -q ."
+      ],
+      "test_commands": [
+        "python -m pytest"
+      ],
+      "security_commands": [],
+      "scanner_commands": [
+        "osv-scanner --recursive ."
+      ],
+      "detected_tools": [
+        "python",
+        "osv-scanner"
+      ]
+    },
+    "collection_warnings": [],
+    "bundle_hash": "a9fdf6f83734565a65254930679e2b02aa99238c1092ca673a8ed42cbcaf2e93"
+  },
+  "repair_route": {
+    "family": "dependency",
+    "preferred_executor": "sca_dependency_executor",
+    "active_executor": "sca_dependency_executor",
+    "verification_profile": {
+      "name": "dependency_upgrade",
+      "required_layers": [
+        "build",
+        "business_regression",
+        "scanner_rescan",
+        "differential_risk"
+      ],
+      "optional_layers": [
+        "security_regression"
+      ],
+      "rationale": "Require install/build, regression, lockfile diff risk, and scanner rescan when available.",
+      "security_oracles": [
+        "dependency_resolution",
+        "compatibility_regression",
+        "sca_rescan"
+      ]
+    },
+    "confidence": 0.98,
+    "automation_eligible": true,
+    "blocking_reasons": [],
+    "missing_evidence": [
+      "security_regression_command"
+    ],
+    "fallback_reason": null
+  },
+  "status": "exhausted",
+  "run_mode": "balanced",
+  "reasoning_trace": {
+    "impact": {
+      "stage": "impact",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "bounded_react",
+      "escalated": true,
+      "escalation_reasons": [
+        "high_severity_without_confirmed_call_path"
+      ],
+      "llm_calls": 6,
+      "tool_calls": {
+        "list_dir": 1,
+        "search_code": 2
+      },
+      "stopped_reason": "no_new_evidence",
+      "details": {}
+    },
+    "root_cause": {
+      "stage": "root_cause",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "hypothesis_test",
+      "escalated": true,
+      "escalation_reasons": [
+        "sink_missing",
+        "high_severity_confidence_below_0.6"
+      ],
+      "llm_calls": 4,
+      "tool_calls": {
+        "list_dir": 1,
+        "search_code": 3
+      },
+      "stopped_reason": "no_new_evidence",
+      "details": {
+        "hypotheses": [
+          {
+            "hypothesis": "Django 5.0.6 的 Extract/Trunc 函数中 lookup_name 参数未做白名单校验，直接拼入 SQL",
+            "required_evidence": [
+              "Django 5.0.6 源码中 django/db/models/functions/datetime.py 的 Extract.as_sql 方法实现",
+              "Django 5.0.8 中对应方法的校验逻辑差异",
+              "CVE 或安全公告的具体描述"
+            ],
+            "support": [
+              "仓库路径明确包含 sql-injection 标识",
+              "回归测试文件 test_extract_trunc.py 存在",
+              "上游修复版本 5.0.8 与 5.0.6 相近，符合补丁版本模式",
+              "Django Extract/Trunc 的 lookup_name 在 ORM API 中确实用于 SQL 构造"
+            ],
+            "counter_evidence": [
+              "当前仓库不包含任何 Django 框架源码",
+              "EvidenceBundle 中无 source_candidates 和 sink_candidates",
+              "无 CVE 编号或安全公告文本",
+              "工具搜索确认仓库中不存在 lookup_name、Extract、Trunc 等相关代码"
+            ],
+            "verdict": "unknown"
+          },
+          {
+            "hypothesis": "漏洞不在 lookup_name 而在 Extract/Trunc 的其他参数（如 output_field 或 tzinfo）",
+            "required_evidence": [
+              "Django 5.0.6 到 5.0.8 的 changelog 或 commit diff",
+              "回归测试的具体断言内容"
+            ],
+            "support": [
+              "测试文件名为 test_extract_trunc.py，与 Extract/Trunc 相关"
+            ],
+            "counter_evidence": [
+              "lookup_name 是 Extract/Trunc 中最可能被拼入 SQL 结构的参数",
+              "其他参数如 output_field 是 Python 对象，不太可能直接拼入 SQL"
+            ],
+            "verdict": "unknown"
+          }
+        ]
+      }
+    },
+    "remediation": {
+      "stage": "remediation",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "bounded_react",
+      "escalated": true,
+      "escalation_reasons": [
+        "root_cause_confidence_below_0.5",
+        "root_cause_has_unknowns",
+        "previous_failure_requires_source_recheck"
+      ],
+      "llm_calls": 2,
+      "tool_calls": {
+        "read_file": 2,
+        "list_dir": 1
+      },
+      "stopped_reason": "model_completed",
+      "details": {
+        "final_decision": "plan_and_solve_with_candidate_ranking"
+      }
+    },
+    "patch": {
+      "stage": "patch",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "patch_synthesis",
+      "escalated": false,
+      "escalation_reasons": [],
+      "llm_calls": 0,
+      "tool_calls": {},
+      "stopped_reason": null,
+      "details": {
+        "artifacts_count": 2,
+        "executor": "sca_dependency_workspace_executor",
+        "change_set": {
+          "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+          "component": "django",
+          "current_version": "5.0.6",
+          "target_version": "5.0.8",
+          "ecosystem": "python",
+          "dependency_scope": "direct",
+          "compatibility_risk": "same_major_upgrade",
+          "manifests": [
+            "requirements.txt",
+            "pyproject.toml"
+          ],
+          "lockfiles": [],
+          "validation_invariants": [
+            "the vulnerable direct version is absent from changed declarations",
+            "the selected version is one of the reported fixed versions",
+            "all changed manifests remain syntactically valid",
+            "lock metadata must not be silently left stale"
+          ]
+        },
+        "workspace_checks": [
+          {
+            "name": "edit:requirements.txt",
+            "passed": true,
+            "details": "updated django from 5.0.6 to 5.0.8",
+            "duration_ms": 0
+          },
+          {
+            "name": "edit:pyproject.toml",
+            "passed": true,
+            "details": "updated django from 5.0.6 to 5.0.8",
+            "duration_ms": 0
+          },
+          {
+            "name": "syntax:pyproject.toml",
+            "passed": true,
+            "details": "manifest syntax is valid",
+            "duration_ms": 0
+          },
+          {
+            "name": "syntax:requirements.txt",
+            "passed": true,
+            "details": "manifest syntax is valid",
+            "duration_ms": 0
+          },
+          {
+            "name": "fixed_dependency_declaration",
+            "passed": true,
+            "details": "fixed direct dependency is declared",
+            "duration_ms": 0
+          }
+        ],
+        "repair_session": null
+      }
+    },
+    "failure": {
+      "stage": "failure",
+      "pipeline_mode": "balanced",
+      "reasoning_mode": "reflexion_diagnosis",
+      "escalated": false,
+      "escalation_reasons": [],
+      "llm_calls": 1,
+      "tool_calls": {},
+      "stopped_reason": null,
+      "details": {
+        "failed_layers": [
+          "business_regression",
+          "scanner_rescan"
+        ],
+        "route_to": "root_cause_agent",
+        "reflection_count": 2
+      }
+    }
+  },
+  "report": {
+    "report_id": "report-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-blocked",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "status": "blocked",
+    "title": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断",
+    "executive_summary": "候选补丁已经生成，但已执行的必要验证未通过。",
+    "root_cause_summary": "",
+    "remediation_summary": "",
+    "changed_files": [],
+    "test_results": [],
+    "security_validation_results": [],
+    "validation_summary": [],
+    "risk_summary": [],
+    "rollback_summary": "",
+    "human_review_focus": [
+      "请先处理验证失败原因，再生成正式修复报告。"
+    ],
+    "pr_description_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：business_regression: business_regression command completed; exit code 5; scanner_rescan: scanner_rescan command completed; exit code 1\n\n## 未验证的候选补丁\n\n### `pyproject.toml`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/pyproject.toml b/pyproject.toml\nindex 328eb09..184d015 100644\n--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -1 +1 @@\n-dependencies = [\"Django==5.0.6\"]\n+dependencies = [\"Django==5.0.8\"]\n```\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+    "ticket_comment_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：business_regression: business_regression command completed; exit code 5; scanner_rescan: scanner_rescan command completed; exit code 1\n\n## 未验证的候选补丁\n\n### `pyproject.toml`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/pyproject.toml b/pyproject.toml\nindex 328eb09..184d015 100644\n--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -1 +1 @@\n-dependencies = [\"Django==5.0.6\"]\n+dependencies = [\"Django==5.0.8\"]\n```\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+    "sections": [],
+    "blocked_reason": "business_regression: business_regression command completed; exit code 5; scanner_rescan: scanner_rescan command completed; exit code 1",
+    "needs_human_review": true
+  },
+  "report_markdown": "# VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 修复报告生成被阻断\n\n候选补丁 `patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002` 未通过必要验证。\n\n阻断原因：business_regression: business_regression command completed; exit code 5; scanner_rescan: scanner_rescan command completed; exit code 1\n\n## 未验证的候选补丁\n\n### `pyproject.toml`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/pyproject.toml b/pyproject.toml\nindex 328eb09..184d015 100644\n--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -1 +1 @@\n-dependencies = [\"Django==5.0.6\"]\n+dependencies = [\"Django==5.0.8\"]\n```\n\n### `requirements.txt`\n\nGit-generated direct dependency upgrade from the verified SCA workspace\n\n```diff\ndiff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8\n```\n",
+  "patch_candidate": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "generated",
+    "summary": "SCA executor upgraded django from 5.0.6 to 5.0.8 across 2 manifest(s)",
+    "artifacts": [
+      {
+        "patch_type": "dependency",
+        "target": "pyproject.toml",
+        "content": "diff --git a/pyproject.toml b/pyproject.toml\nindex 328eb09..184d015 100644\n--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -1 +1 @@\n-dependencies = [\"Django==5.0.6\"]\n+dependencies = [\"Django==5.0.8\"]",
+        "description": "Git-generated direct dependency upgrade from the verified SCA workspace",
+        "needs_manual_fix": false,
+        "fix_reason": ""
+      },
+      {
+        "patch_type": "dependency",
+        "target": "requirements.txt",
+        "content": "diff --git a/requirements.txt b/requirements.txt\nindex 284d5f5..2aad463 100644\n--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-Django==5.0.6\n+Django==5.0.8",
+        "description": "Git-generated direct dependency upgrade from the verified SCA workspace",
+        "needs_manual_fix": false,
+        "fix_reason": ""
+      }
+    ],
+    "changed_files": [
+      {
+        "file": "pyproject.toml",
+        "change_type": "dependency",
+        "reason": "replace vulnerable direct dependency django 5.0.6 with fixed version 5.0.8"
+      },
+      {
+        "file": "requirements.txt",
+        "change_type": "dependency",
+        "reason": "replace vulnerable direct dependency django 5.0.6 with fixed version 5.0.8"
+      }
+    ],
+    "test_changes": [
+      {
+        "name": "test_django_version_upgrade",
+        "test_type": "integration",
+        "target": "Django 依赖版本",
+        "assertion": "确认安装的 Django 版本 >= 5.0.8，且项目可正常启动"
+      },
+      {
+        "name": "test_extract_lookup_name_whitelist",
+        "test_type": "unit",
+        "target": "Django Extract/Trunc 函数 lookup_name 参数校验",
+        "assertion": "传入非法 lookup_name 值时应被拒绝（抛出异常），合法值正常工作"
+      },
+      {
+        "name": "test_existing_orm_queries_regression",
+        "test_type": "regression",
+        "target": "项目中所有使用 Extract/Trunc 的 ORM 查询",
+        "assertion": "升级 Django 后所有现有数据库查询行为不变，结果一致"
+      },
+      {
+        "name": "business contract regression from failed validation",
+        "test_type": "business_regression",
+        "target": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+        "assertion": "existing API response shape and semantics remain unchanged"
+      },
+      {
+        "name": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 exploit regression",
+        "test_type": "security_regression",
+        "target": "requirements.txt",
+        "assertion": "the reported exploit condition is rejected at the confirmed trust boundary, while the corresponding legitimate operation remains supported"
+      }
+    ],
+    "security_notes": [
+      "Target version was selected only from reported fixed_versions.",
+      "Manifest syntax and the exact dependency declaration were re-parsed.",
+      "Git generated the final unified diff from verified workspace edits."
+    ],
+    "assumptions": [],
+    "risks": [
+      "Compatibility risk classification: same_major_upgrade. Full consumer compatibility requires the configured build and regression commands."
+    ],
+    "validation_plan": {
+      "build_commands": [
+        "run Django test runner tests"
+      ],
+      "security_tests": [
+        "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6 exploit regression"
+      ],
+      "business_regression_tests": [
+        "business contract regression from failed validation"
+      ],
+      "scanner_rescan_required": false
+    },
+    "policy_check": {
+      "allowed_files_only": true,
+      "forbidden_changes_detected": false,
+      "changed_files_count": 2,
+      "estimated_diff_lines": 4,
+      "within_patch_boundaries": true,
+      "violations": []
+    },
+    "blocked_reason": null,
+    "needs_human_review": true
+  },
+  "patch_validation": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "status": "failed",
+    "layers": [
+      {
+        "layer": "build",
+        "status": "not_configured",
+        "tool_results": [
+          {
+            "layer": "build",
+            "tool_name": "build",
+            "status": "not_configured",
+            "summary": "no executable command configured for build",
+            "command": null,
+            "evidence": [
+              "Unified diff applied successfully in the isolated workspace."
+            ],
+            "exit_code": null,
+            "duration_ms": null
+          }
+        ],
+        "summary": "no executable command configured for build"
+      },
+      {
+        "layer": "business_regression",
+        "status": "failed",
+        "tool_results": [
+          {
+            "layer": "business_regression",
+            "tool_name": "\"C:\\Python314\\python.exe\" -m pytest -q",
+            "status": "failed",
+            "summary": "business_regression command completed; exit code 5",
+            "command": "\"C:\\Python314\\python.exe\" -m pytest -q",
+            "evidence": [
+              "no tests ran in 0.02s"
+            ],
+            "exit_code": 5,
+            "duration_ms": 2417
+          }
+        ],
+        "summary": "business_regression command completed; exit code 5"
+      },
+      {
+        "layer": "scanner_rescan",
+        "status": "failed",
+        "tool_results": [
+          {
+            "layer": "scanner_rescan",
+            "tool_name": "osv-scanner --recursive .",
+            "status": "failed",
+            "summary": "scanner_rescan command completed; exit code 1",
+            "command": "osv-scanner --recursive .",
+            "evidence": [
+              "Scanning dir .\nStarting filesystem walk for root: C:\\\nScanned C:\\Users\\30455\\AppData\\Local\\Temp\\vuln-agent-validation-krj652hg\\workspace\\requirements.txt file and found 1 package\nEnd status: 3 dirs visited, 8 inodes visited, 1 Extract calls, 1.7975ms elapsed, 1.7975ms wall time\n\nTotal 2 packages affected by 22 known vulnerabilities (4 Critical, 6 High, 12 Medium, 0 Low, 0 Unknown) from 1 ecosystem.\n22 vulnerabilities can be fixed.\n\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+\n| OSV URL                             | CVSS | ECOSYSTEM | PACKAGE | VERSION | FIXED VERSION | SOURCE           |\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+\n| https://osv.dev/PYSEC-2024-102      | 6.9  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-5hgc-2vfp-mqvc |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-156      | 7.5  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-8498-2h75-472j |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-157      | 9.8  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-m9g8-fxxm-xg86 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-1        | 5.8  | PyPI      | django  | 5.0.8   | 5.0.11        | requirements.txt |\n| https://osv.dev/GHSA-qcgg-j2x8-h9g8 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-13       | 5.0  | PyPI      | django  | 5.0.8   | 5.0.13        | requirements.txt |\n| https://osv.dev/GHSA-p3fp-8748-vqfq |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-14       | 5.8  | PyPI      | django  | 5.0.8   | 5.0.14        | requirements.txt |\n| https://osv.dev/GHSA-wqfg-m96j-85vm |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2026-1297     | 6.3  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-rrqc-c2jx-6jgv |      |           |         |         |               |                  |\n| https://osv.dev/GHSA-6w2r-r2m5-xq5w | 7.1  | PyPI      | django  | 5.0.8   | 5.1.12        | requirements.txt |\n| https://osv.dev/GHSA-7xr5-9hcq-chf9 | 4.0  | PyPI      | django  | 5.0.8   | 5.1.10        | requirements.txt |\n| https://osv.dev/GHSA-frmv-pr5f-9mcr | 9.1  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/GHSA-qw25-v68c-qjf3 | 7.5  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/PYSEC-2024-102      | 6.9  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-5hgc-2vfp-mqvc |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-156      | 7.5  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-8498-2h75-472j |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-157      | 9.8  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-m9g8-fxxm-xg86 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-1        | 5.8  | PyPI      | django  | 5.0.8   | 5.0.11        | requirements.txt |\n| https://osv.dev/GHSA-qcgg-j2x8-h9g8 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-13       | 5.0  | PyPI      | django  | 5.0.8   | 5.0.13        | requirements.txt |\n| https://osv.dev/GHSA-p3fp-8748-vqfq |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-14       | 5.8  | PyPI      | django  | 5.0.8   | 5.0.14        | requirements.txt |\n| https://osv.dev/GHSA-wqfg-m96j-85vm |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2026-1297     | 6.3  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-rrqc-c2jx-6jgv |      |           |         |         |               |                  |\n| https://osv.dev/GHSA-6w2r-r2m5-xq5w | 7.1  | PyPI      | django  | 5.0.8   | 5.1.12        | requirements.txt |\n| https://osv.dev/GHSA-7xr5-9hcq-chf9 | 4.0  | PyPI      | django  | 5.0.8   | 5.1.10        | requirements.txt |\n| https://osv.dev/GHSA-frmv-pr5f-9mcr | 9.1  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/GHSA-qw25-v68c-qjf3 | 7.5  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+"
+            ],
+            "exit_code": 1,
+            "duration_ms": 7317
+          }
+        ],
+        "summary": "scanner_rescan command completed; exit code 1"
+      },
+      {
+        "layer": "differential_risk",
+        "status": "passed",
+        "tool_results": [
+          {
+            "layer": "differential_risk",
+            "tool_name": "candidate policy check",
+            "status": "passed",
+            "summary": "candidate is within declared patch boundaries",
+            "command": "internal:patch-policy-check",
+            "evidence": [
+              "changed_files=2",
+              "estimated_diff_lines=4",
+              "allowed_files_only=True"
+            ],
+            "exit_code": 0,
+            "duration_ms": null
+          }
+        ],
+        "summary": "differential_risk validation passed"
+      }
+    ],
+    "failures": [
+      {
+        "check": "business_regression",
+        "reason": "business_regression command completed; exit code 5",
+        "suggested_adjustment": "把失败用例和断言差异交给失败分析 Agent，判断是否业务回归"
+      },
+      {
+        "check": "scanner_rescan",
+        "reason": "scanner_rescan command completed; exit code 1",
+        "suggested_adjustment": "把扫描器复验告警交给失败分析 Agent，判断是残留漏洞还是误报"
+      }
+    ],
+    "next_action": "send_to_failure_analysis_agent",
+    "feedback_for_failure_analysis": "business_regression: business_regression command completed; exit code 5; scanner_rescan: scanner_rescan command completed; exit code 1",
+    "report_ready": false,
+    "needs_human_review": true
+  },
+  "patch_quality": {
+    "candidate_status": "generated",
+    "executable_artifact_rate": 1.0,
+    "planned_change_coverage_rate": 1.0,
+    "validation_layer_pass_rate": 0.25,
+    "changed_files_count": 2,
+    "estimated_diff_lines": 4,
+    "manual_fix_artifact_count": 0,
+    "generated_test_contract_valid": false,
+    "missing_planned_changes": [],
+    "quality_gate_passed": false,
+    "ready_for_automated_delivery": false,
+    "gate_failures": [
+      "validation_status:failed",
+      "security_test_missing_attack_or_legitimate_behavior_direction"
+    ]
+  },
+  "failure_analysis": {
+    "patch_id": "patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002",
+    "finding_id": "VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6",
+    "primary_category": "business_regression",
+    "summary": "Let me analyze the validation failure carefully.\n\n## Patch Information\n- patch_id: patch-VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6-002\n- finding_id: VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6\n- Summary: SCA executor upgraded django from 5.0.6 to 5.0.8 across 2 manifest(s)\n\n## Validation Layer Results\n\n### 1. Build: not_configured\n- No executable command configured for build\n- Evidence: \"Unified diff applied successfully in the isolated workspace.\"\n- This is a non-blocking issue - build wasn't configured, but the patch applied successfully.\n\n### 2. Business Regression: failed (exit code 5)\n- Command: `\"C:\\Python314\\python.exe\" -m pytest -q`\n- Exit code: 5\n- Evidence: \"no tests ran in 0.02s\"\n- Exit code 5 in pytest means \"no tests were collected\" - this is a pytest convention where exit code 5 means no tests were found.\n- This is NOT a real business regression - it's a test harness issue. There are no tests in the project to run.\n\n### 3. Scanner Rescan: failed (exit code 1)\n- Command: `osv-scanner --recursive .`\n- Exit code: 1\n- Evidence shows: Django 5.0.8 still has 22 known vulnerabilities\n- The scanner found that django 5.0.8 is still vulnerable to many CVEs, with fixed versions ranging from 5.0.9 to 5.1.14\n- This is the critical failure - the patch upgraded to 5.0.8, but 5.0.8 is still vulnerable to many issues\n\n### 4. Differential Risk: passed\n- The patch is within declared boundaries, changed 2 files, 4 estimated diff lines\n\n## Root Cause Analysis\n\nThe primary failure is in the scanner_rescan layer. The patch upgraded Django from 5.0.6 to 5.0.8, but 5.0.8 is still affected by 22 known vulnerabilities. The scanner shows that the minimum fixed version for some vulnerabilities is 5.0.9, and for others it's as high as 5.1.14.\n\nLooking at the vulnerabilities:\n- PYSEC-2024-102: fixed in 5.0.9\n- PYSEC-2024-156: fixed in 5.0.10\n- PYSEC-2024-157: fixed in 5.0.10\n- PYSEC-2025-1: fixed in 5.0.11\n- PYSEC-2025-13: fixed in 5.0.13\n- PYSEC-2025-14: fixed in 5.0.14\n- PYSEC-2026-1297: fixed in 5.0.9\n- GHSA-6w2r-r2m5-xq5w: fixed in 5.1.12\n- GHSA-7xr5-9hcq-chf9: fixed in 5.1.10\n- GHSA-frmv-pr5f-9mcr: fixed in 5.1.14\n- GHSA-qw25-v68c-qjf3: fixed in 5.1.14\n\nSo the remediation plan chose 5.0.8 as the target version, but this is insufficient. The original finding was about SQL injection in Django 5.0.6, and the fix was to upgrade to 5.0.8. However, 5.0.8 doesn't fix all the vulnerabilities that the scanner checks for.\n\nThe key question is: was the original finding specifically about the SQLi vulnerability (Extract/Trunc lookup_name parameter)? If so, the fix version for that specific vulnerability might be 5.0.8 or earlier. But the scanner is reporting ALL vulnerabilities for django 5.0.8, not just the original SQLi.\n\nThis creates a situation where:\n1. The patch may have correctly fixed the specific SQLi vulnerability it was targeting\n2. But the scanner still reports vulnerabilities because 5.0.8 has other known vulnerabilities\n\nThis is a \"scanner_still_reports\" issue - the scanner reports all vulnerabilities for the package version, not just the one being remediated.\n\nHowever, looking more carefully, the scanner shows vulnerabilities with fixed versions as low as 5.0.9. If the original SQLi vulnerability was one of those with a fix version of 5.0.9 or higher, then upgrading to 5.0.8 wouldn't fix it.\n\nLet me think about this more carefully. The finding mentions \"SQL injection\" in Django's Extract/Trunc database functions with lookup_name parameter. Looking at the CVEs:\n- PYSEC-2024-157 (CVSS 9.8) - This could be the SQLi one, fixed in 5.0.10\n- GHSA-frmv-pr5f-9mcr (CVSS 9.1) - Could also be SQLi, fixed in 5.1.14\n\nIf the SQLi vulnerability requires 5.0.10 or higher to fix, then upgrading to 5.0.8 is insufficient.\n\nActually, let me reconsider. The remediation plan said \"将项目依赖的 Django 从 5.0.6 升级到 5.0.8\" - upgrade from 5.0.6 to 5.0.8. But the scanner shows that 5.0.8 still has 22 vulnerabilities, some of which require 5.0.9, 5.0.10, 5.0.11, 5.0.13, 5.0.14, or even 5.1.x to fix.\n\nThe primary issue is that the target version (5.0.8) was insufficient to clear the vulnerabilities. The remediation plan should have targeted a higher version.\n\nFor the business_regression failure: exit code 5 with \"no tests ran\" means pytest found no tests to run. This is a test harness configuration issue, not a real regression. The project likely has no test files, or the test discovery configuration is wrong.\n\nLet me now structure my diagnosis:\n\n### Primary Category: scanner_still_reports\nThe scanner still reports 22 vulnerabilities for django 5.0.8 because the target upgrade version was insufficient.\n\n### Findings:\n\n1. **scanner_still_reports (blocker)**: osv-scanner found 22 vulnerabilities for django 5.0.8. The minimum fixed version across all reported vulnerabilities is 5.0.9, and some require 5.1.14. Upgrading to 5.0.8 doesn't clear any of the reported vulnerabilities.\n\n2. **test_harness_failure (high)**: pytest exit code 5 means \"no tests collected\". The project has no test files, so the business regression check is meaningless. This is a tooling gap.\n\n3. **tooling_gap (medium)**: Build layer not configured - no build command was set up.\n\n### Diagnostic Hypotheses:\n1. The remediation plan incorrectly identified 5.0.8 as the fix version for the SQLi vulnerability. The actual fix version may be 5.0.9 or higher.\n2. The remediation plan may have correctly identified 5.0.8 for the specific SQLi, but the scanner checks for ALL vulnerabilities, not just the targeted one. In this case, the validation criteria may need adjustment.\n3. The business regression test failure is a false positive caused by lack of test files.\n\n### Remediation Feedback:\n- The target version should be upgraded to at least 5.0.14 (the highest 5.0.x fix version) or 5.1.14 (the highest overall fix version) to clear all reported vulnerabilities.\n- If only the specific SQLi vulnerability needs to be fixed, the validation criteria should be adjusted to check only for that specific CVE, not all vulnerabilities.\n\n### Patch Generation Feedback:\n- The patch correctly modified 2 manifest files (requirements.txt in 2 locations) and the diff was within boundaries.\n- The version target needs to be revised.\n\n### Validation Feedback:\n- The business regression test should handle the \"no tests\" case gracefully (exit code 5 should be treated as \"not applicable\" rather than \"failed\").\n- The build layer should either be configured or explicitly marked as \"not applicable\".\n\nLet me now think about what the correct target version should be. Looking at the scanner output:\n\nFor the 5.0.x line:\n- 5.0.9 fixes: PYSEC-2024-102, PYSEC-2026-1297\n- 5.0.10 fixes: PYSEC-2024-156, PYSEC-2024-157\n- 5.0.11 fixes: PYSEC-2025-1\n- 5.0.13 fixes: PYSEC-2025-13\n- 5.0.14 fixes: PYSEC-2025-14\n\nFor the 5.1.x line:\n- 5.1.10 fixes: GHSA-7xr5-9hcq-chf9\n- 5.1.12 fixes: GHSA-6w2r-r2m5-xq5w\n- 5.1.14 fixes: GHSA-frmv-pr5f-9mcr, GHSA-qw25-v68c-qjf3\n\nSo to clear ALL vulnerabilities, you'd need to go to 5.1.14 (which is >= 5.0.14 and >= 5.1.14).\n\nBut wait - the original finding was specifically about SQLi in Extract/Trunc. The remediation plan should target the specific CVE. If the SQLi is PYSEC-2024-157 (CVSS 9.8, fixed in 5.0.10), then the target should be at least 5.0.10.\n\nHowever, the scanner will still report other vulnerabilities even if the SQLi is fixed. This is a validation criteria issue.\n\nLet me reconsider the route_to. The primary issue is that the remediation plan chose an insufficient target version. This should route to remediation_plan_agent.\n\nActually, I need to think about this more carefully. The finding_id is \"VALIDATION-COVERAGE-DJANGO-SQLI-5.0.6\" which suggests the original finding was about SQLi in Django 5.0.6. The remediation plan upgraded to 5.0.8. But the scanner still reports vulnerabilities.\n\nTwo possible scenarios:\n1. The SQLi vulnerability's fix version is > 5.0.8, so the patch didn't actually fix the targeted vulnerability → remediation_plan_agent needs to re-evaluate\n2. The SQLi vulnerability's fix version is <= 5.0.8, but the scanner reports ALL vulnerabilities → validation_toolchain needs to adjust criteria\n\nGiven that the scanner shows PYSEC-2024-157 (CVSS 9.8) fixed in 5.0.10, and this is likely the SQLi vulnerability (high CVSS, SQL injection), scenario 1 is more likely. The remediation plan chose 5.0.8 but the actual fix requires 5.0.10.\n\nBut I should also consider that the remediation plan explicitly says \"修复 Extract/Trunc 数据库函数中 lookup_name 参数缺少白名单校验导致的 SQL 注入漏洞\" - this is CVE-2024-42005 / GHSA-m9g8-fxxm-xg86 / PYSEC-2024-157, which is fixed in Django 5.0.10 (not 5.0.8).\n\nWait, let me check again. Looking at the scanner output:\n- PYSEC-2024-157, CVSS 9.8, fixed in 5.0.10 - this is likely the SQLi\n- GHSA-m9g8-fxxm-xg86 is paired with PYSEC-2024-157\n\nSo the SQLi vulnerability (PYSEC-2024-157) requires Django 5.0.10 to fix, but the remediation plan only upgraded to 5.0.8. This is the root cause.\n\nActually, I need to be more careful. Let me look at what Django version fixed CVE-2024-42005 (the SQLi in Extract/Trunc). Based on the scanner output, PYSEC-2024-157 with CVSS 9.8 is fixed in 5.0.10. This is very likely the SQLi vulnerability being targeted.\n\nSo the diagnosis is clear:\n1. **Primary failure**: The remediation plan targeted Django 5.0.8, but the SQLi vulnerability (PYSEC-2024-157, CVSS 9.8) requires Django 5.0.10 to fix. The target version was insufficient.\n2. **Secondary failure**: Business regression test failed with exit code 5 (no tests collected) - this is a test harness issue, not a real regression.\n3. **Tertiary**: Build not configured - tooling gap.\n\nThe route should be to remediation_plan_agent to revise the target version.\n\nBut wait - should I also consider that even if we upgrade to 5.0.10, the scanner will still report other vulnerabilities (those requiring 5.0.11, 5.0.13, 5.0.14, 5.1.x)? Yes, it will. So there's also a validation criteria issue - the scanner checks for ALL vulnerabilities, not just the targeted one.\n\nThis means:\n- If the validation criteria is \"scanner must report 0 vulnerabilities\", then the target version needs to be 5.1.14 (or the latest available)\n- If the validation criteria is \"the specific SQLi vulnerability must be fixed\", then 5.0.10 would suffice, but the scanner needs to be configured to check only for the specific CVE\n\nGiven the current setup, the scanner runs `osv-scanner --recursive .` which reports ALL vulnerabilities. So either:\n1. Upgrade to a version that clears ALL vulnerabilities (5.1.14+)\n2. Adjust the scanner to only check for the specific CVE\n\nI think the most practical approach is to upgrade to the latest available Django version that clears all reported vulnerabilities. Looking at the scanner output, the highest fixed version is 5.1.14. But we should also consider that there might be even newer versions available.\n\nActually, looking more carefully at the scanner output, the vulnerabilities are listed twice (duplicated). The unique vulnerabilities are:\n1. PYSEC-2024-102 / GHSA-5hgc-2vfp-mqvc - CVSS 6.9 - fixed in 5.0.9\n2. PYSEC-2024-156 / GHSA-8498-2h75-472j - CVSS 7.5 - fixed in 5.0.10\n3. PYSEC-2024-157 / GHSA-m9g8-fxxm-xg86 - CVSS 9.8 - fixed in 5.0.10\n4. PYSEC-2025-1 / GHSA-qcgg-j2x8-h9g8 - CVSS 5.8 - fixed in 5.0.11\n5. PYSEC-2025-13 / GHSA-p3fp-8748-vqfq - CVSS 5.0 - fixed in 5.0.13\n6. PYSEC-2025-14 / GHSA-wqfg-m96j-85vm - CVSS 5.8 - fixed in 5.0.14\n7. PYSEC-2026-1297 / GHSA-rrqc-c2jx-6jgv - CVSS 6.3 - fixed in 5.0.9\n8. GHSA-6w2r-r2m5-xq5w - CVSS 7.1 - fixed in 5.1.12\n9. GHSA-7xr5-9hcq-chf9 - CVSS 4.0 - fixed in 5.1.10\n10. GHSA-frmv-pr5f-9mcr - CVSS 9.1 - fixed in 5.1.14\n11. GHSA-qw25-v68c-qjf3 - CVSS 7.5 - fixed in 5.1.14\n\nSo 11 unique vulnerabilities. To clear all of them, you need Django >= 5.1.14.\n\nBut the original finding was specifically about SQLi. The remediation plan should focus on fixing the SQLi, and the validation should check if the SQLi is fixed. However, the current scanner setup checks for ALL vulnerabilities.\n\nMy recommendation:\n1. Route to remediation_plan_agent to revise the target version to at least 5.0.10 (to fix the specific SQLi) or 5.1.14 (to clear all scanner-reported vulnerabilities)\n2. Also provide feedback to validation_toolchain about the business regression test harness issue\n\nLet me also consider: the scanner output shows the vulnerabilities are duplicated (each appears twice). This might be because the scanner scanned 2 manifest files (as mentioned in the patch summary \"across 2 manifest(s)\"). This is expected behavior.\n\nNow let me also think about whether the scanner is scanning the correct directory. The evidence shows:\n```\nStarting filesystem walk for root: C:\\\nScanned C:\\Users\\30455\\AppData\\Local\\Temp\\vuln-agent-validation-krj652hg\\workspace\\requirements.txt file and found 1 package\n```\n\nWait, it says \"Starting filesystem walk for root: C:\\\" but then scans the workspace requirements.txt. This seems like the scanner started from C:\\ but only found 1 package in the workspace. The \"1 package\" is django 5.0.8. But the scanner reports \"Total 2 packages affected by 22 known vulnerabilities\" - this might be because it found django in 2 locations (2 manifest files).\n\nActually, looking again: \"found 1 package\" in the requirements.txt, but \"Total 2 packages affected\" - this could mean 2 instances of the same package (django) across 2 manifest files. The scanner output table shows each vulnerability twice, which supports this.\n\nOK, I think I have a clear picture now. Let me formulate my response.\n\n### Primary Category: scanner_still_reports\n\n### Summary\n补丁将 Django 从 5.0.6 升级到 5.0.8，但目标版本不足以修复 SQLi 漏洞（PYSEC-2024-157 需要 5.0.10），且扫描器仍报告 22 个已知漏洞。\n\n### Findings:\n\n1. **scanner_still_reports (blocker)**\n   - Failed layer: scanner_rescan\n   - Summary: osv-scanner 报告 Django 5.0.8 仍有 22 个已知漏洞（11 个唯一 CVE），目标版本不足以清除任何已报告漏洞\n   - Evidence: 扫描器输出显示 django 5.0.8 的修复版本从 5.0.9 到 5.1.14 不等\n   - Suspected reason: 修复方案选择的目标版本 ",
+    "findings": [
+      {
+        "category": "business_regression",
+        "severity": "high",
+        "failed_layer": "business_regression",
+        "summary": "business_regression command completed; exit code 5",
+        "evidence": [
+          "no tests ran in 0.02s",
+          "command=\"C:\\Python314\\python.exe\" -m pytest -q; exit_code=5"
+        ],
+        "suspected_reason": "the selected remediation changed an existing business contract",
+        "suggested_adjustment": "re-rank remediation candidates with the failed business contract as a hard constraint"
+      },
+      {
+        "category": "scanner_still_reports",
+        "severity": "high",
+        "failed_layer": "scanner_rescan",
+        "summary": "scanner_rescan command completed; exit code 1",
+        "evidence": [
+          "Scanning dir .\nStarting filesystem walk for root: C:\\\nScanned C:\\Users\\30455\\AppData\\Local\\Temp\\vuln-agent-validation-krj652hg\\workspace\\requirements.txt file and found 1 package\nEnd status: 3 dirs visited, 8 inodes visited, 1 Extract calls, 1.7975ms elapsed, 1.7975ms wall time\n\nTotal 2 packages affected by 22 known vulnerabilities (4 Critical, 6 High, 12 Medium, 0 Low, 0 Unknown) from 1 ecosystem.\n22 vulnerabilities can be fixed.\n\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+\n| OSV URL                             | CVSS | ECOSYSTEM | PACKAGE | VERSION | FIXED VERSION | SOURCE           |\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+\n| https://osv.dev/PYSEC-2024-102      | 6.9  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-5hgc-2vfp-mqvc |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-156      | 7.5  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-8498-2h75-472j |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-157      | 9.8  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-m9g8-fxxm-xg86 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-1        | 5.8  | PyPI      | django  | 5.0.8   | 5.0.11        | requirements.txt |\n| https://osv.dev/GHSA-qcgg-j2x8-h9g8 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-13       | 5.0  | PyPI      | django  | 5.0.8   | 5.0.13        | requirements.txt |\n| https://osv.dev/GHSA-p3fp-8748-vqfq |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-14       | 5.8  | PyPI      | django  | 5.0.8   | 5.0.14        | requirements.txt |\n| https://osv.dev/GHSA-wqfg-m96j-85vm |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2026-1297     | 6.3  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-rrqc-c2jx-6jgv |      |           |         |         |               |                  |\n| https://osv.dev/GHSA-6w2r-r2m5-xq5w | 7.1  | PyPI      | django  | 5.0.8   | 5.1.12        | requirements.txt |\n| https://osv.dev/GHSA-7xr5-9hcq-chf9 | 4.0  | PyPI      | django  | 5.0.8   | 5.1.10        | requirements.txt |\n| https://osv.dev/GHSA-frmv-pr5f-9mcr | 9.1  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/GHSA-qw25-v68c-qjf3 | 7.5  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/PYSEC-2024-102      | 6.9  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-5hgc-2vfp-mqvc |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-156      | 7.5  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-8498-2h75-472j |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2024-157      | 9.8  | PyPI      | django  | 5.0.8   | 5.0.10        | requirements.txt |\n| https://osv.dev/GHSA-m9g8-fxxm-xg86 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-1        | 5.8  | PyPI      | django  | 5.0.8   | 5.0.11        | requirements.txt |\n| https://osv.dev/GHSA-qcgg-j2x8-h9g8 |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-13       | 5.0  | PyPI      | django  | 5.0.8   | 5.0.13        | requirements.txt |\n| https://osv.dev/GHSA-p3fp-8748-vqfq |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2025-14       | 5.8  | PyPI      | django  | 5.0.8   | 5.0.14        | requirements.txt |\n| https://osv.dev/GHSA-wqfg-m96j-85vm |      |           |         |         |               |                  |\n| https://osv.dev/PYSEC-2026-1297     | 6.3  | PyPI      | django  | 5.0.8   | 5.0.9         | requirements.txt |\n| https://osv.dev/GHSA-rrqc-c2jx-6jgv |      |           |         |         |               |                  |\n| https://osv.dev/GHSA-6w2r-r2m5-xq5w | 7.1  | PyPI      | django  | 5.0.8   | 5.1.12        | requirements.txt |\n| https://osv.dev/GHSA-7xr5-9hcq-chf9 | 4.0  | PyPI      | django  | 5.0.8   | 5.1.10        | requirements.txt |\n| https://osv.dev/GHSA-frmv-pr5f-9mcr | 9.1  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n| https://osv.dev/GHSA-qw25-v68c-qjf3 | 7.5  | PyPI      | django  | 5.0.8   | 5.1.14        | requirements.txt |\n+-------------------------------------+------+-----------+---------+---------+---------------+------------------+",
+          "command=osv-scanner --recursive .; exit_code=1"
+        ],
+        "suspected_reason": "the vulnerable pattern remains or the scanner matched another call site",
+        "suggested_adjustment": "locate every remaining scanner match and distinguish real coverage gaps from scanner configuration"
+      }
+    ],
+    "route_to": "root_cause_agent",
+    "remediation_feedback": [],
+    "patch_generation_feedback": [],
+    "validation_feedback": [],
+    "requires_root_cause_recheck": true,
+    "needs_human_review": true,
+    "diagnostic_hypotheses": [
+      "the selected remediation changed an existing business contract",
+      "the vulnerable pattern remains or the scanner matched another call site"
+    ],
+    "reflection": [
+      "business_regression: the selected remediation changed an existing business contract",
+      "scanner_still_reports: the vulnerable pattern remains or the scanner matched another call site"
+    ],
+    "do_not_repeat": [
+      "do not repeat patch behavior that caused business_regression: business_regression command completed; exit code 5",
+      "do not repeat patch behavior that caused scanner_still_reports: scanner_rescan command completed; exit code 1"
+    ]
+  }
+}

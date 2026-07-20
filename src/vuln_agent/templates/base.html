@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}漏洞修复智能体平台{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@1.9.10/dist/htmx.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/diff.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/python.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/languages/json.min.js"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      🛡️ VulnFix
+      <span>研发安全智能体</span>
+    </div>
+    <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">
+      <span class="icon">📊</span> 仪表盘
+    </a>
+    <a href="/new" class="{{ 'active' if request.url.path == '/new' else '' }}">
+      <span class="icon">➕</span> 新建修复
+    </a>
+    <a href="/chat" class="{{ 'active' if request.url.path == '/chat' else '' }}">
+      <span class="icon">💬</span> 对话分析
+    </a>
+    <a href="/repo" class="{{ 'active' if '/repo' in request.url.path else '' }}">
+      <span class="icon">📁</span> 代码仓库管理
+    </a>
+    <a href="/history" class="{{ 'active' if request.url.path == '/history' else '' }}">
+      <span class="icon">📋</span> 历史记录
+    </a>
+    <div style="margin-top: auto; padding-top: 1rem; border-top: 1px solid var(--border);">
+      <div style="font-size: .7rem; color: var(--text2);">
+        LLM: {{ '🌐 已启用' if has_llm else '⚙️ 确定性模式' }}
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<!-- Alpine.js global state -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.store('app', {
+    llmEnabled: {{ 'true' if has_llm else 'false' }},
+    currentTask: null,
+  });
+});
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
