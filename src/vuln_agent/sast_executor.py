@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +26,11 @@ from .semantic import (
     PythonSemanticContextBuilder,
     SemanticContextPackage,
     SymbolContext,
+)
+from .scenarios.sql_injection.taxonomy import (
+    SQLInjectionKind,
+    classify_sql_injection,
+    is_sql_injection,
 )
 
 if TYPE_CHECKING:
@@ -81,6 +86,8 @@ class SASTCodeRepairExecutor:
     @staticmethod
     def classify(finding: NormalizedVulnerability) -> str | None:
         text = finding.vulnerability_type.lower()
+        if is_sql_injection(finding):
+            return "sql_injection"
         if any(term in text for term in ("sql injection", "sql注入", "sql 注入")):
             return "sql_injection"
         if any(term in text for term in ("command injection", "os command", "命令注入")):
@@ -98,6 +105,7 @@ class SASTCodeRepairExecutor:
         evidence: EvidenceBundle,
         *,
         previous_feedback: str = "",
+        prefer_deterministic: bool = False,
     ) -> dict:
         family = self.classify(finding)
         if family not in SUPPORTED_SAST_FAMILIES:
@@ -119,9 +127,17 @@ class SASTCodeRepairExecutor:
             }
 
         baseline = {_norm(item.path): item.content for item in source_files}
+        sql_kind = (
+            classify_sql_injection(finding)
+            if family == "sql_injection"
+            else None
+        )
+        if sql_kind == SQLInjectionKind.IDENTIFIER:
+            package = self._constrain_identifier_package(package, finding)
         generation_errors: list[str] = []
         all_checks: list[WorkspaceCheck] = []
         llm_calls = 0
+        last_edits: list[StructuredEdit] = []
 
         with tempfile.TemporaryDirectory(prefix="vuln-agent-sast-") as tmp:
             workspace = Path(tmp) / "workspace"
@@ -144,6 +160,7 @@ class SASTCodeRepairExecutor:
                 edits: list[StructuredEdit] = []
                 use_model = (
                     self.llm is not None
+                    and not prefer_deterministic
                     and not (
                         family == "sql_injection"
                         and attempt == self.max_attempts
@@ -162,10 +179,16 @@ class SASTCodeRepairExecutor:
                             f"structured edit generation failed: {type(exc).__name__}"
                         )
                 if not edits:
-                    edits = self._deterministic_edits(package, family)
+                    edits = self._deterministic_edits(
+                        package,
+                        family,
+                        source_snapshot=baseline,
+                        sql_kind=sql_kind,
+                    )
                 if not edits:
                     generation_errors.append("no valid structured edits generated")
                     break
+                last_edits = list(edits)
 
                 apply_errors = self._apply_edits(workspace, package, edits)
                 if apply_errors:
@@ -175,7 +198,12 @@ class SASTCodeRepairExecutor:
 
                 checks = [
                     *self._syntax_checks(workspace, package),
-                    *self._security_oracle_checks(workspace, package, family),
+                    *self._security_oracle_checks(
+                        workspace,
+                        package,
+                        family,
+                        sql_kind=sql_kind,
+                    ),
                     *self._focused_checks(workspace, package),
                 ]
                 all_checks.extend(checks)
@@ -218,15 +246,71 @@ class SASTCodeRepairExecutor:
                     "blocked_reason": None,
                     "llm_calls": llm_calls,
                     "change_set": package.change_set.to_dict(),
+                    "edit_ir": [asdict(item) for item in edits],
                     "workspace_checks": [asdict(item) for item in all_checks],
                     "executor": "sast_workspace_executor",
+                    "sql_injection_kind": (
+                        sql_kind.value if sql_kind is not None else None
+                    ),
                 }
 
-        return self._blocked(
+        blocked = self._blocked(
             package,
             "; ".join(generation_errors) or "workspace repair exhausted",
             all_checks,
             llm_calls,
+        )
+        blocked["edit_ir"] = [asdict(item) for item in last_edits]
+        return blocked
+
+    @staticmethod
+    def _constrain_identifier_package(
+        package: SemanticContextPackage,
+        finding: NormalizedVulnerability,
+    ) -> SemanticContextPackage:
+        """Keep an identifier fix at the reported, evidence-backed ingress."""
+
+        target_paths = {
+            _norm(location.file)
+            for location in finding.locations
+            if location.file
+        }
+        target_functions = {
+            location.function.split("(", 1)[0].strip()
+            for location in finding.locations
+            if location.function
+        }
+        selected = tuple(
+            context
+            for context in package.symbols
+            if context.file in target_paths
+            and (
+                not target_functions
+                or any(
+                    context.symbol == function
+                    or context.symbol.endswith("." + function)
+                    for function in target_functions
+                )
+            )
+        )
+        if not selected:
+            return package
+        selected_keys = {
+            (context.file, context.symbol)
+            for context in selected
+        }
+        changes = tuple(
+            change
+            for change in package.change_set.changes
+            if (change.file, change.symbol) in selected_keys
+        )
+        return replace(
+            package,
+            symbols=selected,
+            change_set=replace(
+                package.change_set,
+                changes=changes,
+            ),
         )
 
     def _request_edits(
@@ -416,17 +500,34 @@ Rules:
     def _deterministic_sql_edits(
         self,
         package: SemanticContextPackage,
+        *,
+        source_snapshot: dict[str, str],
+        sql_kind: SQLInjectionKind,
     ) -> list[StructuredEdit]:
         edits: list[StructuredEdit] = []
         for context in package.symbols:
-            replacement = self._parameterize_simple_dbapi_function(context)
+            if sql_kind == SQLInjectionKind.VALUE:
+                replacement = self._parameterize_simple_dbapi_function(context)
+                rationale = (
+                    "Replace SQL string concatenation with a DB-API bound parameter."
+                )
+            else:
+                replacement = self._insert_peer_identifier_guard(
+                    context,
+                    source_snapshot.get(_norm(context.file), ""),
+                    sql_kind,
+                )
+                rationale = (
+                    "Apply the existing sibling security control at the untrusted "
+                    f"{sql_kind.value} ingress."
+                )
             if replacement:
                 edits.append(StructuredEdit(
                     context.file,
                     "replace_symbol",
                     context.symbol,
                     replacement,
-                    "Replace SQL string concatenation with a DB-API bound parameter.",
+                    rationale,
                 ))
                 test_path = next(iter(package.change_set.relevant_tests), None)
                 if test_path:
@@ -445,6 +546,9 @@ Rules:
         self,
         package: SemanticContextPackage,
         family: str,
+        *,
+        source_snapshot: dict[str, str] | None = None,
+        sql_kind: SQLInjectionKind | None = None,
     ) -> list[StructuredEdit]:
         """Return conservative AST-backed fallbacks for high-confidence shapes.
 
@@ -453,7 +557,11 @@ Rules:
         string heuristics.
         """
         if family == "sql_injection":
-            return self._deterministic_sql_edits(package)
+            return self._deterministic_sql_edits(
+                package,
+                source_snapshot=source_snapshot or {},
+                sql_kind=sql_kind or SQLInjectionKind.VALUE,
+            )
         edits: list[StructuredEdit] = []
         for context in package.symbols:
             if family == "command_injection":
@@ -501,6 +609,148 @@ Rules:
                     "Exercise an attack input and a legitimate input.",
                 ))
         return edits
+
+    @staticmethod
+    def _insert_peer_identifier_guard(
+        context: SymbolContext,
+        full_source: str,
+        sql_kind: SQLInjectionKind,
+    ) -> str | None:
+        """Reuse a security guard already established by sibling methods."""
+
+        if not full_source or "." not in context.symbol:
+            return None
+        try:
+            tree = ast.parse(full_source)
+        except SyntaxError:
+            return None
+        target = _find_symbol(tree, context.symbol)
+        parent = _find_symbol(tree, context.symbol.rsplit(".", 1)[0])
+        if not isinstance(target, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        if not isinstance(parent, ast.ClassDef):
+            return None
+
+        target_calls = {
+            call.func.attr
+            for call in ast.walk(target)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "self"
+        }
+        candidates: dict[str, int] = {}
+        for sibling in parent.body:
+            if (
+                not isinstance(sibling, (ast.FunctionDef, ast.AsyncFunctionDef))
+                or sibling is target
+            ):
+                continue
+            for call in ast.walk(sibling):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "self"
+                    and _looks_like_security_control(call.func.attr, sql_kind)
+                ):
+                    candidates[call.func.attr] = candidates.get(call.func.attr, 0) + 1
+        if not candidates:
+            return None
+        guard = sorted(candidates, key=lambda name: (-candidates[name], name))[0]
+        if guard in target_calls:
+            return None
+
+        parameters = [
+            argument.arg
+            for argument in target.args.args
+            if argument.arg not in {"self", "cls"}
+        ]
+        parameter = next(
+            (
+                name
+                for name in parameters
+                if any(
+                    token in name.lower()
+                    for token in (
+                        "field",
+                        "column",
+                        "alias",
+                        "identifier",
+                        "name",
+                        "order",
+                        "sort",
+                        "expression",
+                    )
+                )
+            ),
+            None,
+        )
+        if parameter is None:
+            return None
+
+        original = textwrap.dedent(context.source).strip("\n")
+        try:
+            local_tree = ast.parse(original)
+        except SyntaxError:
+            return None
+        local_target = next(
+            (
+                node
+                for node in local_tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ),
+            None,
+        )
+        if local_target is None:
+            return None
+        insert_after = local_target.lineno
+        if (
+            local_target.body
+            and isinstance(local_target.body[0], ast.Expr)
+            and isinstance(local_target.body[0].value, ast.Constant)
+            and isinstance(local_target.body[0].value.value, str)
+        ):
+            insert_after = local_target.body[0].end_lineno or insert_after
+
+        lines = original.splitlines()
+        body_indent = " " * (
+            local_target.body[0].col_offset if local_target.body else 4
+        )
+        collection_like = (
+            parameter.endswith(("s", "_list", "_set", "_fields", "_names"))
+            or parameter in {"fields", "columns", "aliases", "identifiers"}
+        )
+        guarded_block = next(
+            (
+                node
+                for node in local_target.body
+                if isinstance(node, ast.If)
+                and any(
+                    isinstance(part, ast.Name)
+                    and part.id == parameter
+                    for part in ast.walk(node.test)
+                )
+            ),
+            None,
+        )
+        if collection_like and guarded_block is not None:
+            insert_after = guarded_block.lineno
+            body_indent = " " * (
+                guarded_block.body[0].col_offset
+                if guarded_block.body
+                else local_target.col_offset + 8
+            )
+        if collection_like:
+            item = _singular_identifier(parameter)
+            guard_lines = [
+                f"{body_indent}for {item} in {parameter}:",
+                f"{body_indent}    self.{guard}({item})",
+            ]
+        else:
+            guard_lines = [f"{body_indent}self.{guard}({parameter})"]
+        lines[insert_after:insert_after] = guard_lines
+        return "\n".join(lines)
 
     @staticmethod
     def _replace_simple_shell_call(context: SymbolContext) -> str | None:
@@ -904,6 +1154,8 @@ Rules:
         workspace: Path,
         package: SemanticContextPackage,
         family: str,
+        *,
+        sql_kind: SQLInjectionKind | None = None,
     ) -> list[WorkspaceCheck]:
         started = time.perf_counter()
         problems: list[str] = []
@@ -915,7 +1167,17 @@ Rules:
                 problems.append(f"{context.file}: {exc}")
                 continue
             if family == "sql_injection":
-                problems.extend(_sql_oracle_problems(context.file, tree))
+                try:
+                    problems.extend(
+                        _sql_oracle_problems(
+                            context.file,
+                            tree,
+                            context.symbol,
+                            sql_kind or SQLInjectionKind.VALUE,
+                        )
+                    )
+                except ValueError as exc:
+                    problems.append(str(exc))
             elif family == "command_injection":
                 problems.extend(_command_oracle_problems(context.file, tree))
             elif family == "path_traversal":
@@ -957,6 +1219,10 @@ Rules:
 
     def _run(self, workspace: Path, name: str, command: str) -> WorkspaceCheck:
         started = time.perf_counter()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(workspace), env.get("PYTHONPATH", "")])
+        )
         try:
             result = subprocess.run(
                 command,
@@ -966,6 +1232,7 @@ Rules:
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
+                env=env,
             )
             output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
             return WorkspaceCheck(
@@ -1138,19 +1405,49 @@ def _constant_around(parts: list[ast.AST], dynamic: ast.Name) -> tuple[str, str]
     return before, after
 
 
-def _sql_oracle_problems(path: str, tree: ast.AST) -> list[str]:
+def _sql_oracle_problems(
+    path: str,
+    tree: ast.AST,
+    target_symbol: str,
+    sql_kind: SQLInjectionKind = SQLInjectionKind.VALUE,
+) -> list[str]:
+    scope = _resolve_ast_symbol(tree, target_symbol)
+    if scope is None:
+        raise ValueError(f"{path}: target symbol {target_symbol!r} could not be resolved")
+    if sql_kind != SQLInjectionKind.VALUE:
+        expected_controls = _peer_sql_security_controls(
+            tree,
+            target_symbol,
+            sql_kind,
+        )
+        if not expected_controls:
+            return [
+                f"{path}:{target_symbol}: no same-scope {sql_kind.value} "
+                "security-control precedent was found"
+            ]
+        target_controls = {
+            _call_name(node)
+            for node in _walk_symbol_scope(scope)
+            if isinstance(node, ast.Call)
+        }
+        missing = sorted(expected_controls - target_controls)
+        return [
+            f"{path}:{target_symbol}: missing peer security control {control}"
+            for control in missing
+        ]
     assignments: dict[str, ast.AST] = {}
     problems: list[str] = []
     saw_execute = False
     saw_bound_execute = False
-    for node in ast.walk(tree):
+    scoped_nodes = tuple(_walk_symbol_scope(scope))
+    for node in scoped_nodes:
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
         ):
             assignments[node.targets[0].id] = node.value
-    for node in ast.walk(tree):
+    for node in scoped_nodes:
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -1176,6 +1473,90 @@ def _sql_oracle_problems(path: str, tree: ast.AST) -> list[str]:
     if saw_execute and not saw_bound_execute:
         problems.append(f"{path}: vulnerable path has no bound-parameter execute call")
     return problems
+
+
+def _peer_sql_security_controls(
+    tree: ast.AST,
+    target_symbol: str,
+    sql_kind: SQLInjectionKind,
+) -> set[str]:
+    parent_name, _, child_name = target_symbol.rpartition(".")
+    parent = _resolve_ast_symbol(tree, parent_name) if parent_name else tree
+    if parent is None:
+        return set()
+    candidates: dict[str, int] = {}
+    for sibling in getattr(parent, "body", []):
+        if not isinstance(sibling, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if sibling.name == child_name:
+            continue
+        for node in _walk_symbol_scope(sibling):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            leaf = name.rsplit(".", 1)[-1]
+            if _looks_like_security_control(leaf, sql_kind):
+                candidates[name] = candidates.get(name, 0) + 1
+    if not candidates:
+        return set()
+    highest = max(candidates.values())
+    return {
+        name for name, count in candidates.items()
+        if count == highest
+    }
+
+
+def _call_name(call: ast.Call) -> str:
+    if (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id in {"self", "cls"}
+    ):
+        return f"{call.func.value.id}.{call.func.attr}"
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return ast.unparse(call.func)
+
+
+def _resolve_ast_symbol(tree: ast.AST, target_symbol: str) -> ast.AST | None:
+    """Resolve an exact semantic qualname without falling back to the module."""
+
+    found: dict[str, ast.AST] = {}
+
+    def visit(node: ast.AST, parents: tuple[str, ...] = ()) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qualname = ".".join((*parents, child.name))
+                found[qualname] = child
+                visit(child, (*parents, child.name))
+            else:
+                visit(child, parents)
+
+    visit(tree)
+    return found.get(target_symbol)
+
+
+def _walk_symbol_scope(scope: ast.AST):
+    """Walk one symbol while excluding unrelated nested symbol definitions."""
+
+    def visit(node: ast.AST):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+            ):
+                continue
+            yield from visit(child)
+
+    yield scope
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(
+            child,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+        ):
+            continue
+        yield from visit(child)
 
 
 def _command_oracle_problems(path: str, tree: ast.AST) -> list[str]:
@@ -1270,6 +1651,64 @@ def _dynamic_string_expression(node: ast.AST | None) -> bool:
     ):
         return True
     return False
+
+
+def _looks_like_security_control(
+    name: str,
+    sql_kind: SQLInjectionKind,
+) -> bool:
+    lowered = name.lower()
+    common = (
+        "check",
+        "validate",
+        "sanitize",
+        "escape",
+        "quote",
+        "allow",
+        "safe",
+        "normalize",
+    )
+    if not any(token in lowered for token in common):
+        return False
+    if sql_kind == SQLInjectionKind.ORDERING:
+        return any(
+            token in lowered
+            for token in ("order", "sort", "field", "column", "name")
+        )
+    if sql_kind == SQLInjectionKind.IDENTIFIER:
+        return any(
+            token in lowered
+            for token in ("alias", "identifier", "column", "field", "name")
+        )
+    if sql_kind == SQLInjectionKind.ORM_EXPRESSION:
+        return any(
+            token in lowered
+            for token in ("expression", "resolve", "filter", "lookup")
+        )
+    return True
+
+
+def _singular_identifier(name: str) -> str:
+    known = {
+        "fields": "field",
+        "columns": "column",
+        "aliases": "alias",
+        "identifiers": "identifier",
+        "names": "name",
+        "expressions": "expression",
+        "orderings": "ordering",
+    }
+    if name in known:
+        return known[name]
+    if name.endswith("_list"):
+        return name[:-5] or "item"
+    if name.endswith("_set"):
+        return name[:-4] or "item"
+    if name.endswith("ies"):
+        return name[:-3] + "y"
+    if name.endswith("s") and len(name) > 1:
+        return name[:-1]
+    return "item"
 
 
 def _norm(path: str) -> str:

@@ -1,0 +1,47 @@
+{
+  "date": "2026-07-20",
+  "scope": "phase_1_to_phase_4",
+  "baseline": {
+    "tests": 120,
+    "passed": 120,
+    "duration_seconds": 97.488
+  },
+  "after": {
+    "tests": 128,
+    "passed": 128,
+    "duration_seconds": 380.061,
+    "regressions": 0
+  },
+  "benchmark_inventory": {
+    "total": 60,
+    "sql_injection": 20,
+    "command_injection": 15,
+    "path_traversal": 15,
+    "dependency": 10
+  },
+  "sql_phase4_benchmark": {
+    "executed_cases": 20,
+    "dual_direction_pytest": true,
+    "standalone_duration_before_shared_command_dedup_seconds": 278.603,
+    "baseline_reproduction_rate": 1.0,
+    "exact_apply_rate": 1.0,
+    "build_pass_rate": 1.0,
+    "security_pass_rate": 1.0,
+    "business_pass_rate": 1.0,
+    "accepted_patch_precision": 1.0,
+    "pass_at_1": 1.0
+  },
+  "negative_controls": {
+    "safe_baseline_blocked": true,
+    "missing_business_oracle_candidate_only": true,
+    "failed_model_strategy_recorded": true,
+    "semantic_duplicate_detected": true,
+    "deterministic_final_fallback_accepted": true
+  },
+  "limitations": [
+    "The 20-case SQL benchmark executes generated attack and legitimate-input pytest checks, but remains a local pattern matrix rather than a public real-world vulnerability corpus.",
+    "No live DeepSeek API benchmark was run, so stochastic model pass@k and cost are not measured.",
+    "Command injection, path traversal, and dependency cases remain on their existing executors; only SQL injection is migrated to RepairKernel in phase 4.",
+    "The built-in SQL security oracle is AST-based. Automated routing additionally requires executable security and business commands."
+  ]
+}

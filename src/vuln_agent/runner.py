@@ -24,7 +24,6 @@ from .models import (
     FailedControl,
     PatchGenerationPolicy,
     PropagationStep,
-    RemediationPolicy,
     RepositoryContext,
     SourceFile,
 )
@@ -237,6 +236,11 @@ def run_dict(raw: dict[str, Any], **overrides: Any) -> dict[str, Any]:
             "failure": loop.failure_analysis_agent.last_execution.to_dict(),
         },
     }
+    repair_session = loop.patch_generation_agent.last_execution.details.get(
+        "repair_session"
+    )
+    if repair_session:
+        output["repair_session"] = repair_session
 
     if result.final_report is not None:
         output["report"] = result.final_report.to_dict()
@@ -442,6 +446,39 @@ def _build_dependency_root_cause(finding, raw: dict[str, Any], overrides: dict[s
 
 
 def _build_engineering(finding, raw: dict[str, Any], is_dependency: bool, overrides: dict[str, Any]) -> EngineeringContext:
+    validation_commands = raw.get("validation_commands") or {}
+    override_validation_commands = overrides.get("validation_commands") or {}
+    if not isinstance(validation_commands, dict):
+        validation_commands = {}
+    if not isinstance(override_validation_commands, dict):
+        override_validation_commands = {}
+
+    def commands(
+        direct_key: str,
+        *validation_keys: str,
+    ) -> list[str]:
+        values: list[str] = []
+        for configured in (
+            overrides.get(direct_key),
+            *(
+                override_validation_commands.get(key)
+                for key in validation_keys
+            ),
+            *(
+                validation_commands.get(key)
+                for key in validation_keys
+            ),
+        ):
+            if isinstance(configured, str):
+                values.append(configured)
+            elif isinstance(configured, (list, tuple)):
+                values.extend(
+                    str(item) for item in configured if str(item).strip()
+                )
+        return list(dict.fromkeys(
+            item.strip() for item in values if item and item.strip()
+        ))
+
     return EngineeringContext(
         language=overrides.get("language", raw.get("language", "Python")),
         framework=overrides.get("framework", raw.get("framework", "Flask" if not is_dependency else "Java web application")),
@@ -449,7 +486,30 @@ def _build_engineering(finding, raw: dict[str, Any], is_dependency: bool, overri
         data_access_library=overrides.get("data_access_library"),
         package_manager=overrides.get("package_manager", raw.get("package_manager", "pip" if not is_dependency else "maven")),
         dependency_versions=overrides.get("dependency_versions", {}),
-        available_test_commands=overrides.get("available_test_commands", []),
+        available_test_commands=commands(
+            "available_test_commands",
+            "business_regression",
+            "test",
+        ),
+        available_security_commands=commands(
+            "available_security_commands",
+            "security_regression",
+            "security",
+        ),
+        available_poc_commands=commands(
+            "available_poc_commands",
+            "poc",
+            "reproducer",
+        ),
+        available_build_commands=commands(
+            "available_build_commands",
+            "build",
+        ),
+        available_scanner_commands=commands(
+            "available_scanner_commands",
+            "scanner_rescan",
+            "scanner",
+        ),
         related_tests=overrides.get("related_tests", []),
         deployment_targets=overrides.get("deployment_targets", [raw.get("repository", "default")]),
     )

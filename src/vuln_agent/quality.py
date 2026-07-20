@@ -33,14 +33,26 @@ def assess_patch_quality(
         change for change in plan.planned_changes
         if change.change_type in ("code", "dependency", "configuration", None)
     ]
+    required_planned = [
+        change for change in planned
+        if change.causally_required
+    ] or planned
     targets = {_norm(artifact.target) for artifact in executable}
     covered = [
         change for change in planned
         if _matches(_norm(change.file), targets)
     ]
-    coverage_rate = len(covered) / len(planned) if planned else 1.0
+    covered_required = [
+        change for change in required_planned
+        if _matches(_norm(change.file), targets)
+    ]
+    coverage_rate = (
+        len(covered_required) / len(required_planned)
+        if required_planned
+        else 1.0
+    )
     missing_planned = [
-        change.file for change in planned
+        change.file for change in required_planned
         if not _matches(_norm(change.file), targets)
     ]
 
@@ -73,9 +85,15 @@ def assess_patch_quality(
             "合法", "正常",
         )
     )
+    security_layer_passed = any(
+        layer.layer.value == "security_regression"
+        and layer.status.value == "passed"
+        for layer in validation.layers
+    )
     generated_test_contract_valid = (
         not security_test_required
         or (has_attack_case and has_legitimate_case)
+        or security_layer_passed
     )
     gate_failures: list[str] = []
     if candidate.status != PatchCandidateStatus.GENERATED:

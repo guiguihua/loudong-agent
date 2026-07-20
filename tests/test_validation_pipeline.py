@@ -315,6 +315,46 @@ class ValidationEvidenceTests(unittest.TestCase):
             self.assertTrue(all(item.status == ToolExecutionStatus.PASSED for item in results))
             self.assertTrue(all(item.command and item.exit_code == 0 and item.evidence for item in results))
 
+    def test_django_source_tree_uses_focused_runtests_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "django").mkdir()
+            (root / "django" / "__init__.py").write_text("", encoding="utf-8")
+            (root / "tests" / "queries").mkdir(parents=True)
+            (root / "tests" / "runtests.py").write_text("", encoding="utf-8")
+            (root / "tests" / "queries" / "test_regression.py").write_text(
+                "def test_regression():\n    assert True\n",
+                encoding="utf-8",
+            )
+            focused_candidate = candidate(
+                "--- a/django/__init__.py\n"
+                "+++ b/django/__init__.py\n"
+                "@@ -0,0 +1 @@\n"
+                "+VERSION = 'fixed'\n"
+            )
+            focused_candidate.artifacts.append(PatchArtifact(
+                PatchType.TEST,
+                "tests/queries/test_regression.py",
+                "",
+                "focused SQL injection regression",
+            ))
+
+            business = WorkspaceValidationExecutor._discover_commands(
+                root,
+                ValidationLayer.BUSINESS_REGRESSION,
+                focused_candidate,
+            )
+            security = WorkspaceValidationExecutor._discover_commands(
+                root,
+                ValidationLayer.SECURITY_REGRESSION,
+                focused_candidate,
+            )
+
+            self.assertEqual(len(business), 1)
+            self.assertEqual(business, security)
+            self.assertIn("tests/runtests.py queries.test_regression", business[0])
+            self.assertNotIn("pytest", business[0])
+
 
 if __name__ == "__main__":
     unittest.main()

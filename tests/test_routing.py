@@ -62,6 +62,13 @@ def bundle(*, scanner: bool = False, manifest: bool = False) -> EvidenceBundle:
     )
 
 
+def bundle_without_oracles() -> EvidenceBundle:
+    result = bundle()
+    result.validation_capabilities.test_commands = []
+    result.validation_capabilities.security_commands = []
+    return result
+
+
 class VulnerabilityRouterTests(unittest.TestCase):
     def test_sast_route_requires_scanner_only_when_available(self):
         route = VulnerabilityRouter().route(finding("SQL Injection"), bundle(scanner=True))
@@ -79,6 +86,32 @@ class VulnerabilityRouterTests(unittest.TestCase):
             ValidationLayer.SCANNER_RESCAN,
             route.verification_profile.required_layers,
         )
+
+    def test_sast_route_without_executable_oracles_is_not_automation_eligible(self):
+        route = VulnerabilityRouter().route(
+            finding("SQL Injection"),
+            bundle_without_oracles(),
+        )
+        self.assertFalse(route.automation_eligible)
+        self.assertIn("business_regression_command", route.blocking_reasons)
+        self.assertNotIn("security_regression_command", route.blocking_reasons)
+        self.assertIn("security_regression_command", route.missing_evidence)
+
+    def test_supported_sast_route_accepts_builtin_security_oracle(self):
+        evidence = bundle()
+        evidence.target_files = [
+            FileEvidence("src/app.py", "exact_path", 1, "hash", None)
+        ]
+        evidence.validation_capabilities.security_commands = []
+
+        route = VulnerabilityRouter().route(
+            finding("SQL Injection"),
+            evidence,
+        )
+
+        self.assertTrue(route.automation_eligible)
+        self.assertEqual(route.blocking_reasons, ())
+        self.assertIn("security_regression_command", route.missing_evidence)
 
     def test_dependency_route_uses_sca_profile(self):
         route = VulnerabilityRouter().route(

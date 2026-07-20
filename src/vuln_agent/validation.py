@@ -254,9 +254,5 @@ def passed_tool(layer: ValidationLayer, tool_name: str, summary: str = "passed")
     return ValidationToolResult(layer=layer, tool_name=tool_name, status=ToolExecutionStatus.PASSED, summary=summary)
 
 
-def failed_tool(layer: ValidationLayer, tool_name: str, summary: str) -> ValidationToolResult:
-    return ValidationToolResult(layer=layer, tool_name=tool_name, status=ToolExecutionStatus.FAILED, summary=summary)
-
-
 def skipped_tool(layer: ValidationLayer, tool_name: str, summary: str = "skipped") -> ValidationToolResult:
     return ValidationToolResult(layer=layer, tool_name=tool_name, status=ToolExecutionStatus.SKIPPED, summary=summary)

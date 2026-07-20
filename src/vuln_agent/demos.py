@@ -6,9 +6,8 @@
 
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,11 +16,8 @@ from .models import (
     CodePoint,
     EngineeringContext,
     FailedControl,
-    PatchGenerationPolicy,
     PropagationStep,
-    RemediationPolicy,
     RepositoryContext,
-    Severity,
     SourceFile,
     ValidationLayer,
 )
@@ -31,22 +27,13 @@ from .tools import (
     DependencyRootCauseContext,
     RootCauseCodeContext,
     RuntimeContext,
-    StaticAssetInventoryTool,
-    StaticCodeContextTool,
-    StaticRootCauseEvidenceTool,
-    StaticRuntimeEvidenceTool,
 )
-from .validation import ValidationToolchain, passed_tool
 
 # ── helpers ──────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_DIR = ROOT / "examples"
 VALIDATION_DIR = ROOT / "validation-coverage"
-
-
-def _read_json(name: str) -> dict[str, Any]:
-    return json.loads((EXAMPLES_DIR / name).read_text(encoding="utf-8"))
 
 
 def _django_version(project_dir: Path) -> str:
@@ -89,21 +76,6 @@ class DemoPreset:
 
 
 # ── 共享工厂 ─────────────────────────────────────────────────────────
-
-
-def _default_validation(finding_id: str) -> list[tuple[ValidationLayer, str, str]]:
-    """默认五层全通过（demo 用），可通过 validation_summaries 覆盖。"""
-    return [
-        (ValidationLayer.BUILD, "build", "构建验证通过。"),
-        (ValidationLayer.BUSINESS_REGRESSION, "business regression", "业务回归测试通过。"),
-        (ValidationLayer.SECURITY_REGRESSION, "security regression", "安全回归测试通过。"),
-        (ValidationLayer.SCANNER_RESCAN, "scanner rescan", "扫描器复扫不再命中。"),
-        (ValidationLayer.DIFFERENTIAL_RISK, "diff risk", "补丁差异风险可接受。"),
-    ]
-
-
-def _default_source_files() -> list[SourceFile]:
-    return []
 
 
 # ── code‑sqli ────────────────────────────────────────────────────────

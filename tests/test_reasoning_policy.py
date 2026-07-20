@@ -300,6 +300,73 @@ class ReasoningPolicyTests(unittest.TestCase):
         self.assertTrue(result.needs_human_review)
         self.assertNotEqual(result.status.value, "confirmed")
 
+    def test_root_uses_identifier_peer_control_to_correct_model_hypothesis(self):
+        item = VulnerabilityNormalizer().normalize({
+            "finding_id": "F-ALIAS",
+            "vulnerability_type": "SQL Identifier Injection",
+            "severity": "high",
+            "scanner": "SAST",
+            "affected_file": "orm/query.py",
+            "affected_function": "set_values",
+            "line": 9,
+            "evidence": "attacker-controlled column alias reaches set_values",
+        })
+        bundle = EvidenceCollector().collect(item, [
+            SourceFile(
+                "orm/query.py",
+                "class Query:\n"
+                "    def check_alias(self, alias):\n"
+                "        if ';' in alias:\n"
+                "            raise ValueError('unsafe')\n"
+                "\n"
+                "    def add_annotation(self, alias):\n"
+                "        self.check_alias(alias)\n"
+                "\n"
+                "    def set_values(self, fields):\n"
+                "        self.values_select = tuple(fields)\n",
+            ),
+        ])
+        raw = root_raw() | {
+            "summary": "the SQL compiler quotes aliases incorrectly",
+            "source": {
+                "symbol": "set_values",
+                "file": "orm/query.py",
+                "line": 9,
+            },
+            "sink": {
+                "symbol": "compiler",
+                "file": "orm/compiler.py",
+                "line": 1,
+            },
+            "affected_code": [{
+                "file": "orm/compiler.py",
+                "function": "compile",
+                "lines": [1],
+                "role": "primary_cause",
+            }],
+            "confidence_score": 0.3,
+        }
+
+        result = RootCauseAnalysisAgent._ground_assessment(
+            item,
+            bundle,
+            RootCauseAnalysisAgent._dict_to_root_cause(item, raw),
+        )
+
+        self.assertEqual(
+            result.root_cause.missing_control,
+            "apply self.check_alias to every incoming identifier at set_values",
+        )
+        self.assertEqual(
+            [affected.file for affected in result.affected_code],
+            ["orm/query.py"],
+        )
+        self.assertIn(
+            "peer_control_missing_at_identifier_ingress",
+            result.broken_mechanism,
+        )
+        self.assertGreaterEqual(result.confidence_score, 0.85)
+
     def test_root_fallback_does_not_inject_cve_specific_api_claims(self):
         item = VulnerabilityNormalizer().normalize({
             "finding_id": "CVE-2024-37568",

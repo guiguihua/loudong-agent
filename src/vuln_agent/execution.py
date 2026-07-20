@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from .models import (
     ValidationLayer,
     ValidationToolResult,
 )
+from .validation_adapters import DjangoValidationCommandAdapter
 
 
 @dataclass(slots=True)
@@ -172,207 +174,6 @@ class WorkspaceValidationExecutor:
         return hunks
 
     @staticmethod
-    def _search_context(source_lines: list[str], context_lines: list[str], hint: int) -> int | None:
-        """Search source for a context block, returning 0-indexed start line.
-
-        Uses hint (old_start-1) as a starting point with increasing fuzz radius.
-        Tolerates partial mismatches caused by LLM hallucination of context lines
-        (e.g. rewritten docstrings). Requires >= 70% of context lines to match
-        for large hunks, and all context lines for small hunks (<=3 lines).
-        """
-        if not context_lines:
-            return hint if 0 <= hint < len(source_lines) else None
-        max_fuzz = max(30, len(source_lines) // 3)
-        ctx_len = len(context_lines)
-        # Small hunks (<=3 context lines): require exact match
-        # Larger hunks: require >=70% match
-        if ctx_len <= 3:
-            min_match = ctx_len
-        else:
-            min_match = max(2, int(ctx_len * 0.7))
-
-        best_pos = None
-        best_score = -1
-
-        for radius in range(max_fuzz + 1):
-            for direction in (1, -1):
-                offset = hint + direction * radius
-                for start in (offset, offset - 1, offset + 1):
-                    if start < 0 or start + ctx_len > len(source_lines):
-                        continue
-                    matches = 0
-                    for i, ctx in enumerate(context_lines):
-                        sl = source_lines[start + i].rstrip("\n").rstrip("\r")
-                        if sl == ctx:
-                            matches += 1
-                    if matches >= min_match and matches > best_score:
-                        best_score = matches
-                        best_pos = start
-        return best_pos
-
-    @staticmethod
-    def _try_repair_diffs(diffs: list[str], target_dir: Path) -> list[str] | None:
-        """Try to repair incorrect hunk headers by matching context lines."""
-        import re
-        repaired_diffs = []
-        file_pattern = re.compile(r'^---\s+(\S+)\s*$')
-        for diff in diffs:
-            # Parse file paths
-            m_a = re.search(r'^---\s+(\S+)', diff, re.MULTILINE)
-            m_b = re.search(r'^\+\+\+\s+(?:[a-z]+/)?(\S+)', diff, re.MULTILINE)
-            if not m_a or not m_b:
-                repaired_diffs.append(diff)
-                continue
-            file_path = m_b.group(1).strip()
-            source_path = target_dir / file_path
-            if not source_path.exists():
-                repaired_diffs.append(diff)
-                continue
-            source_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            # Rebuild hunk headers
-            hunks = WorkspaceValidationExecutor._parse_hunks(diff)
-            if not hunks:
-                repaired_diffs.append(diff)
-                continue
-            new_hunk_lines = []
-            for hunk in hunks:
-                # Gather the "before" context (space + minus lines)
-                before_ctx = []
-                for bl in hunk["body_lines"]:
-                    if bl.startswith(" ") or bl.startswith("-"):
-                        before_ctx.append(bl[1:])
-                if not before_ctx:
-                    new_hunk_lines.append(
-                        f'@@ -{hunk["old_start"]},{hunk["old_count"]}'
-                        f' +{hunk["new_start"]},{hunk["new_count"]} @@ {hunk["context"]}'
-                    )
-                    new_hunk_lines.extend(hunk["body_lines"])
-                    continue
-                # Search for context in source
-                found = WorkspaceValidationExecutor._search_context(
-                    source_lines, before_ctx, hint=hunk["old_start"] - 1
-                )
-                if found is None:
-                    # Can't repair this hunk — keep original
-                    new_hunk_lines.append(
-                        f'@@ -{hunk["old_start"]},{hunk["old_count"]}'
-                        f' +{hunk["new_start"]},{hunk["new_count"]} @@ {hunk["context"]}'
-                    )
-                    new_hunk_lines.extend(hunk["body_lines"])
-                    continue
-                # Compute correct old_start, old_count, new_count
-                old_start = found + 1  # 1-indexed
-                old_count = len(before_ctx)
-                new_count = old_count
-                for bl in hunk["body_lines"]:
-                    if bl.startswith("+"):
-                        new_count += 1
-                    elif bl.startswith("-"):
-                        new_count -= 1
-                new_start = old_start  # simplified; difflib will correct this
-                new_hunk_lines.append(
-                    f'@@ -{old_start},{old_count} +{new_start},{new_count} @@ {hunk["context"]}'
-                )
-                new_hunk_lines.extend(hunk["body_lines"])
-            # Rebuild diff with correct headers
-            header_lines = []
-            body_start = 0
-            for i, line in enumerate(diff.splitlines()):
-                if i == 0 and (line.startswith("---") or line.startswith("diff")):
-                    header_lines.append(line)
-                    body_start = i + 1
-                elif i < 10 and (line.startswith("---") or line.startswith("+++") or
-                                 line.startswith("diff") or line.startswith("index")):
-                    header_lines.append(line)
-                    body_start = i + 1
-            repaired = "\n".join(header_lines + new_hunk_lines)
-            repaired_diffs.append(repaired)
-        return repaired_diffs if repaired_diffs != diffs else None
-
-    @staticmethod
-    def _try_tolerant_apply(diffs: list[str], target_dir: Path) -> bool:
-        """Apply diffs using tolerant (fuzzy-context) matching.
-
-        Directly patches files instead of relying on git apply, tolerating
-        slightly incorrect hunk headers from LLM-generated diffs.
-        """
-        import re
-        all_ok = True
-        for diff in diffs:
-            m_b = re.search(r'^\+\+\+\s+(?:[a-z]+/)?(\S+)', diff, re.MULTILINE)
-            if not m_b:
-                all_ok = False
-                continue
-            file_path = m_b.group(1).strip()
-            source_path = target_dir / file_path
-            if not source_path.exists():
-                all_ok = False
-                continue
-            source_content = source_path.read_text(encoding="utf-8", errors="replace")
-            new_content = WorkspaceValidationExecutor._apply_single_diff_tolerant(
-                source_content, diff
-            )
-            if new_content is None:
-                all_ok = False
-                continue
-            source_path.write_text(new_content, encoding="utf-8")
-        return all_ok
-
-    @staticmethod
-    def _apply_single_diff_tolerant(source: str, diff: str) -> str | None:
-        """Apply a single-file unified diff with fuzzy context matching.
-
-        Tolerates LLM-hallucinated context lines (e.g. rewritten docstrings) by
-        only removing lines that actually appear in the source.  Context lines
-        that don't match are silently kept, so the LLM cannot accidentally
-        rewrite code by misrepresenting it in the diff.
-        """
-        source_lines = source.splitlines()
-        hunks = WorkspaceValidationExecutor._parse_hunks(diff)
-        if not hunks:
-            return None
-        # Work backwards so line indices stay valid
-        result = list(source_lines)
-        for hunk in reversed(hunks):
-            before_ctx = []
-            for bl in hunk["body_lines"]:
-                if bl.startswith(" ") or bl.startswith("-"):
-                    before_ctx.append(bl[1:])
-            if not before_ctx:
-                continue
-            found = WorkspaceValidationExecutor._search_context(
-                result, before_ctx, hint=hunk["old_start"] - 1
-            )
-            if found is None:
-                return None
-            # Build replacement, line by line, checking each context line
-            # against the source.  Only remove lines that truly match.
-            replacement = []
-            src_idx = found
-            for bl in hunk["body_lines"]:
-                if bl.startswith(" "):
-                    # Context line — use source line (ignore LLM rewrites)
-                    if src_idx < len(result):
-                        replacement.append(result[src_idx])
-                    else:
-                        replacement.append(bl[1:])
-                    src_idx += 1
-                elif bl.startswith("-"):
-                    # Removed line — only skip if source matches
-                    if src_idx < len(result) and result[src_idx].rstrip("\n").rstrip("\r") == bl[1:]:
-                        src_idx += 1  # skip this line
-                    else:
-                        # Source doesn't match, keep original
-                        replacement.append(result[src_idx])
-                        src_idx += 1
-                elif bl.startswith("+"):
-                    # Added line — always include
-                    replacement.append(bl[1:])
-            # Replace from found to src_idx (everything consumed from original)
-            result[found:src_idx] = replacement
-        return "\n".join(result)
-
-    @staticmethod
     def _extract_diff_targets(candidate: PatchCandidate) -> list[str]:
         """Extract target file paths from the diff headers of candidate artifacts."""
         import re
@@ -477,6 +278,13 @@ class WorkspaceValidationExecutor:
         target: Path, layer: ValidationLayer, candidate: PatchCandidate
     ) -> list[str]:
         python = f'"{sys.executable}"'
+        django_source_tree = DjangoValidationCommandAdapter.detects_workspace(target)
+        focused_test_paths = [
+            artifact.target
+            for artifact in candidate.artifacts
+            if artifact.patch_type == PatchType.TEST
+        ]
+        focused_test_paths.extend(item.target for item in candidate.test_changes)
         if layer == ValidationLayer.BUILD:
             # Compile the isolated patched tree. This is always executable for
             # Python repositories and gives real syntax/import-independent evidence.
@@ -495,6 +303,12 @@ class WorkspaceValidationExecutor:
         has_pytest = any((target / name).exists() for name in ("pytest.ini", "pyproject.toml", "tox.ini"))
         tests_dir = target / "tests"
         if layer == ValidationLayer.BUSINESS_REGRESSION:
+            if django_source_tree:
+                command = DjangoValidationCommandAdapter.focused_command(
+                    python,
+                    focused_test_paths,
+                )
+                return [command] if command else []
             if tests_dir.exists() or has_pytest:
                 return [f"{python} -m pytest -q"]
             if (target / "pom.xml").exists() and shutil.which("mvn"):
@@ -508,6 +322,12 @@ class WorkspaceValidationExecutor:
             return []
 
         if layer == ValidationLayer.SECURITY_REGRESSION:
+            if django_source_tree:
+                command = DjangoValidationCommandAdapter.focused_command(
+                    python,
+                    focused_test_paths,
+                )
+                return [command] if command else []
             test_targets = [
                 artifact.target.replace("\\", "/")
                 for artifact in candidate.artifacts
@@ -539,10 +359,14 @@ class WorkspaceValidationExecutor:
 
     def _run(self, cwd: Path, command: str) -> subprocess.CompletedProcess[str]:
         started = time.monotonic()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(None, [str(cwd), env.get("PYTHONPATH", "")])
+        )
         try:
             result = subprocess.run(
                 command, cwd=cwd, shell=True, text=True, capture_output=True,
-                timeout=self.timeout_seconds,
+                timeout=self.timeout_seconds, env=env,
             )
         except subprocess.TimeoutExpired as exc:
             result = subprocess.CompletedProcess(command, 124, exc.stdout or "", exc.stderr or "validation timed out")

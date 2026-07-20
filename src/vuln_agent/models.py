@@ -301,6 +301,10 @@ class EngineeringContext:
     package_manager: str | None = None
     dependency_versions: dict[str, str] = field(default_factory=dict)
     available_test_commands: list[str] = field(default_factory=list)
+    available_security_commands: list[str] = field(default_factory=list)
+    available_poc_commands: list[str] = field(default_factory=list)
+    available_build_commands: list[str] = field(default_factory=list)
+    available_scanner_commands: list[str] = field(default_factory=list)
     related_tests: list[str] = field(default_factory=list)
     deployment_targets: list[str] = field(default_factory=list)
 
@@ -501,6 +505,7 @@ class ValidationCapabilities:
     build_commands: list[str] = field(default_factory=list)
     test_commands: list[str] = field(default_factory=list)
     security_commands: list[str] = field(default_factory=list)
+    poc_commands: list[str] = field(default_factory=list)
     scanner_commands: list[str] = field(default_factory=list)
     detected_tools: list[str] = field(default_factory=list)
 
@@ -605,6 +610,7 @@ class PatchCandidate:
     policy_check: PatchPolicyCheck
     blocked_reason: str | None = None
     needs_human_review: bool = True
+    repair_session: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

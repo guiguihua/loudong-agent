@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from vuln_agent.evidence import EvidenceCollector, format_evidence_bundle
@@ -51,8 +52,147 @@ class EvidenceCollectorTests(unittest.TestCase):
         self.assertTrue(any(item.path == "src/api/users.py" for item in bundle.sink_candidates))
         self.assertIn("python -m pytest", bundle.validation_capabilities.test_commands)
         self.assertIn("python -m compileall -q .", bundle.validation_capabilities.build_commands)
+        self.assertEqual(bundle.validation_capabilities.security_commands, [])
+        self.assertEqual(bundle.validation_capabilities.poc_commands, [])
         self.assertTrue(any(item.path == "tests/test_users.py" and item.related for item in bundle.test_evidence))
         self.assertTrue(bundle.code_slices)
+
+    def test_only_explicit_security_and_poc_commands_become_oracles(self):
+        security = "python -m pytest tests/security/test_sql.py"
+        poc = "python -m pytest tests/security/test_sql.py::test_exploit"
+        bundle = EvidenceCollector().collect(
+            finding(),
+            [
+                SourceFile("src/api/users.py", "def find_user():\n    pass\n"),
+                SourceFile(
+                    "tests/test_users.py",
+                    "def test_find_user():\n    assert True\n",
+                ),
+            ],
+            engineering=EngineeringContext(
+                available_test_commands=["python -m pytest tests/test_users.py"],
+                available_security_commands=[security],
+                available_poc_commands=[poc],
+            ),
+        )
+        self.assertEqual(bundle.validation_capabilities.security_commands, [security])
+        self.assertEqual(bundle.validation_capabilities.poc_commands, [poc])
+
+    def test_django_source_checkout_prefers_focused_runtests_command(self):
+        sources = [
+            SourceFile("django/__init__.py", "VERSION = (5, 0, 6)\n"),
+            SourceFile("django/db/models/sql/query.py", "def set_values(fields):\n    pass\n"),
+            SourceFile("tests/runtests.py", "def main():\n    pass\n"),
+            SourceFile(
+                "tests/query/test_query.py",
+                "def test_set_values_alias():\n    assert True\n",
+            ),
+            SourceFile("pyproject.toml", "[project]\nname = 'Django'\n"),
+        ]
+        bundle = EvidenceCollector().collect(
+            finding(
+                affected_file="django/db/models/sql/query.py",
+                affected_function="set_values",
+                line=1,
+            ),
+            sources,
+            engineering=EngineeringContext(language="Python", framework="Django"),
+        )
+
+        commands = bundle.validation_capabilities.test_commands
+        self.assertIn("python tests/runtests.py query.test_query", commands)
+        self.assertNotIn("python -m pytest", commands)
+        self.assertIn(
+            "django-runtests",
+            bundle.validation_capabilities.detected_tools,
+        )
+
+    def test_django_python_finding_does_not_add_frontend_npm_tests(self):
+        sources = [
+            SourceFile("django/__init__.py", "VERSION = (5, 0, 6)\n"),
+            SourceFile(
+                "django/db/models/sql/query.py",
+                "class Query:\n    def set_values(self, fields):\n        pass\n",
+            ),
+            SourceFile("tests/runtests.py", "def main():\n    pass\n"),
+            SourceFile("package.json", '{"scripts": {"test": "grunt test"}}\n'),
+        ]
+
+        bundle = EvidenceCollector().collect(
+            finding(
+                affected_file="django/db/models/sql/query.py",
+                affected_function="set_values",
+            ),
+            sources,
+            engineering=EngineeringContext(
+                language="Python",
+                framework="Django",
+            ),
+        )
+
+        self.assertNotIn("npm test", bundle.validation_capabilities.test_commands)
+        self.assertNotIn("npm", bundle.validation_capabilities.detected_tools)
+
+    def test_explicit_build_and_scanner_commands_are_preserved(self):
+        bundle = EvidenceCollector().collect(
+            finding(),
+            [SourceFile("src/api/users.py", "def find_user():\n    pass\n")],
+            engineering=EngineeringContext(
+                available_build_commands=["python -m py_compile src/api/users.py"],
+                available_scanner_commands=["semgrep scan --config sql ."],
+            ),
+        )
+
+        self.assertEqual(
+            bundle.validation_capabilities.build_commands,
+            ["python -m py_compile src/api/users.py"],
+        )
+        self.assertEqual(
+            bundle.validation_capabilities.scanner_commands,
+            ["semgrep scan --config sql ."],
+        )
+
+    def test_django_identifier_finding_collects_check_alias_peer_control(self):
+        root = Path(__file__).resolve().parents[1]
+        query_path = (
+            root
+            / "validation-coverage"
+            / "sql-injection"
+            / "django-5.0.6"
+            / "django"
+            / "db"
+            / "models"
+            / "sql"
+            / "query.py"
+        )
+        source = query_path.read_text(encoding="utf-8")
+
+        bundle = EvidenceCollector().collect(
+            finding(
+                affected_file="django/db/models/sql/query.py",
+                affected_function="set_values",
+                line=2442,
+                evidence=(
+                    "values() accepts attacker-controlled JSONField column "
+                    "aliases without enforcing the alias safety invariant"
+                ),
+            ),
+            [SourceFile("django/db/models/sql/query.py", source)],
+            engineering=EngineeringContext(
+                language="Python",
+                framework="Django",
+            ),
+        )
+
+        peer_reasons = [
+            item.reason
+            for item in bundle.code_slices
+            if item.reason.startswith("peer identifier security control:")
+        ]
+        self.assertEqual(
+            peer_reasons,
+            ["peer identifier security control: self.check_alias"],
+        )
 
     def test_collection_is_stable_and_target_files_are_scanned_first(self):
         noisy = "\n".join(f"value_{index} = input()" for index in range(50))

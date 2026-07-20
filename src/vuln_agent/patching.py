@@ -43,7 +43,6 @@ from .models import (
     RepositoryContext,
     RootCauseAssessment,
     SourceFile,
-    TestPlanItem,
     VerificationCheck,
     VerificationCheckStatus,
     VerificationFailure,
@@ -164,6 +163,12 @@ class PatchGenerationAgent(BaseAgent):
         from .sca_executor import SCADependencyRepairExecutor
 
         sast_family = SASTCodeRepairExecutor.classify(finding)
+        feedback = ""
+        if previous_attempt:
+            feedback = "; ".join(
+                f"{item.check}: {item.reason}"
+                for item in previous_attempt.failures
+            )
         if finding.dependency is not None and evidence_bundle is not None:
             raw = SCADependencyRepairExecutor().execute(
                 finding,
@@ -171,13 +176,24 @@ class PatchGenerationAgent(BaseAgent):
                 source_files,
                 evidence_bundle,
             )
+        elif sast_family == "sql_injection" and evidence_bundle is not None:
+            from .repair.kernel import RepairKernel
+            from .scenarios.sql_injection import SQLInjectionRepairScenario
+
+            scenario = SQLInjectionRepairScenario(
+                finding,
+                root_cause,
+                remediation_plan,
+                source_files,
+                evidence_bundle,
+                self.llm,
+                timeout_seconds=90,
+            )
+            raw = RepairKernel(max_attempts=3).run(
+                scenario,
+                previous_feedback=feedback,
+            ).to_raw()
         elif sast_family and evidence_bundle is not None:
-            feedback = ""
-            if previous_attempt:
-                feedback = "; ".join(
-                    f"{item.check}: {item.reason}"
-                    for item in previous_attempt.failures
-                )
             raw = SASTCodeRepairExecutor(
                 self.llm,
                 timeout_seconds=90,
@@ -210,9 +226,24 @@ class PatchGenerationAgent(BaseAgent):
                 "patch", self.stage_policy.pipeline_mode.value,
                 self.stage_policy.fast_path.value,
                 llm_calls=llm_calls,
-                details={"blocked_reason": reason},
+                details={
+                    "blocked_reason": reason,
+                    "executor": raw.get("executor") if isinstance(raw, dict) else None,
+                    "change_set": raw.get("change_set") if isinstance(raw, dict) else None,
+                    "workspace_checks": raw.get("workspace_checks", []) if isinstance(raw, dict) else [],
+                    "repair_session": raw.get("repair_session") if isinstance(raw, dict) else None,
+                },
             )
-            return self._blocked_candidate(finding, remediation_plan, reason)
+            return self._blocked_candidate(
+                finding,
+                remediation_plan,
+                reason,
+                repair_session=(
+                    raw.get("repair_session")
+                    if isinstance(raw, dict)
+                    else None
+                ),
+            )
 
         self.last_execution = StageExecution(
             "patch", self.stage_policy.pipeline_mode.value,
@@ -223,6 +254,7 @@ class PatchGenerationAgent(BaseAgent):
                 "executor": raw.get("executor", "legacy_per_file") if isinstance(raw, dict) else "unknown",
                 "change_set": raw.get("change_set") if isinstance(raw, dict) else None,
                 "workspace_checks": raw.get("workspace_checks", []) if isinstance(raw, dict) else [],
+                "repair_session": raw.get("repair_session") if isinstance(raw, dict) else None,
             },
         )
         return self._dict_to_patch_candidate(
@@ -1869,287 +1901,6 @@ ID: {finding.finding_id}
 
         return issues
 
-    # ── Diff quality scoring for validation hardening ──────────────────
-
-    @staticmethod
-    def _score_diff_quality(
-        artifact: dict, source_content: str
-    ) -> dict:
-        """Score a single patch artifact for quality metrics.
-
-        Returns: {
-            "score": 0.0-1.0,
-            "dimensions": {
-                "header_valid": bool,
-                "hunk_ranges_valid": bool,
-                "context_accuracy": float,  # 0.0-1.0
-                "has_changes": bool,
-                "no_markdown": bool,
-                "applicable": bool,
-            },
-            "issues": [...],
-        }
-        """
-        diff = artifact.get("content", "")
-        target = artifact.get("target", "")
-
-        dimensions = {
-            "header_valid": False,
-            "hunk_ranges_valid": False,
-            "context_accuracy": 0.0,
-            "has_changes": False,
-            "no_markdown": False,
-            "applicable": False,
-        }
-        issues: list[str] = []
-
-        # Header check
-        m_a = re.search(r'^---\s+\S+', diff, re.MULTILINE)
-        m_b = re.search(r'^\+\+\+\s+\S+', diff, re.MULTILINE)
-        dimensions["header_valid"] = bool(m_a and m_b)
-        if not dimensions["header_valid"]:
-            issues.append("invalid_diff_headers")
-
-        # Hunk ranges
-        hunks = PatchGenerationAgent._parse_hunks_inline(diff)
-        source_lines = source_content.splitlines() if source_content else []
-        max_line = len(source_lines)
-        all_ranges_ok = True
-        for h in hunks:
-            if h["old_start"] < 1 or h["old_start"] > max(max_line + 20, 100):
-                all_ranges_ok = False
-                break
-        dimensions["hunk_ranges_valid"] = all_ranges_ok
-        if not all_ranges_ok:
-            issues.append("hunk_range_out_of_bounds")
-
-        # Has actual changes (+/- lines)
-        has_adds = any(l.startswith("+") and not l.startswith("+++") for l in diff.splitlines())
-        has_dels = any(l.startswith("-") and not l.startswith("---") for l in diff.splitlines())
-        dimensions["has_changes"] = has_adds or has_dels
-        if not dimensions["has_changes"]:
-            issues.append("no_actual_changes")
-
-        # No markdown wrapping
-        dimensions["no_markdown"] = "```" not in diff
-        if not dimensions["no_markdown"]:
-            issues.append("contains_markdown_fences")
-
-        # Applicable
-        dimensions["applicable"] = PatchGenerationAgent._verify_diff_applies(
-            diff, source_content
-        )
-        if not dimensions["applicable"]:
-            issues.append("diff_not_applicable")
-
-        # Context accuracy (if source available and hunk ranges valid)
-        if source_content and hunks:
-            ctx_issues = PatchGenerationAgent._validate_diff_context_accuracy(
-                diff, source_content
-            )
-            dimensions["context_accuracy"] = 1.0 if not ctx_issues else 0.5
-            if ctx_issues:
-                issues.append("context_accuracy_low")
-
-        # Overall score
-        weights = {
-            "header_valid": 0.2,
-            "hunk_ranges_valid": 0.15,
-            "context_accuracy": 0.15,
-            "has_changes": 0.2,
-            "no_markdown": 0.1,
-            "applicable": 0.2,
-        }
-        score = sum(
-            v * weights[k] for k, v in dimensions.items()
-            if isinstance(v, (int, float, bool))
-        )
-
-        return {"score": min(1.0, score), "dimensions": dimensions, "issues": issues}
-
-    def _extract_patch_from_raw(
-        self,
-        raw_text: str,
-        finding: NormalizedVulnerability,
-        remediation_plan: RemediationPlan,
-        source_files: list[SourceFile],
-    ) -> dict:
-        """从非结构化的补丁生成文本中二次提取结构化字段。"""
-        if not self.llm:
-            return PatchGenerationAgent._fallback_patch_extraction(
-                raw_text, finding, remediation_plan, source_files
-            )
-
-        from .llm import PATCH_SCHEMA
-
-        # 提取源码中可能的文件路径，帮助 LLM 定位
-        source_paths = [sf.path for sf in source_files[:10] if sf.path]
-        target_files = [c.file for c in remediation_plan.planned_changes]
-
-        extraction_prompt = f"""以下是一段补丁生成的原始输出文本。请从中提取关键信息，填入指定 JSON 结构。
-
-## 漏洞信息
-- ID: {finding.finding_id}
-- 类型: {finding.vulnerability_type}
-
-## 已知源码文件
-{chr(10).join(f'- {p}' for p in source_paths) if source_paths else '（未提供）'}
-
-## 计划修改的文件
-{chr(10).join(f'- {f}' for f in target_files) if target_files else '（未提供）'}
-
-## 原始输出文本
-{raw_text[:10000]}
-
-## 要求
-请仔细阅读上面的文本，提取补丁信息。
-- 如果文本中包含 unified diff（---/+++/@@），将其作为 artifact.content
-- 如果文本中提到了具体文件修改，将其作为 changed_files
-- 如果找不到完整的 diff，至少提取 summary、changed_files 和安全注意事项
-- **必须返回合法的 JSON，不要编造不存在的补丁内容**"""
-
-        try:
-            structured = self.llm.reason(
-                user_prompt=extraction_prompt,
-                system_prompt="你是一个结构化数据提取器。从代码修复文本中提取补丁信息。只输出 JSON。",
-                output_schema={
-                    "type": "object",
-                    "description": "从原始补丁生成文本中提取的补丁信息",
-                    "properties": {
-                        k: v for k, v in PATCH_SCHEMA.get("properties", {}).items()
-                        if k not in ("reasoning",)
-                    },
-                    "required": ["summary", "artifacts", "changed_files", "needs_human_review"],
-                },
-                temperature=0.1,
-            )
-            if isinstance(structured, dict) and (structured.get("summary") or structured.get("artifacts")):
-                return structured
-        except Exception:
-            pass
-
-        return PatchGenerationAgent._fallback_patch_extraction(
-            raw_text, finding, remediation_plan, source_files
-        )
-
-    @staticmethod
-    def _fallback_patch_extraction(
-        raw_text: str,
-        finding: NormalizedVulnerability,
-        remediation_plan: RemediationPlan,
-        source_files: list[SourceFile],
-    ) -> dict:
-        """LLM 不可用时的纯文本回退 — 从补丁文本中提取 diff 和文件信息。"""
-        import re
-
-        # 尝试找到 JSON 块
-        json_match = re.search(r'\{[^{}]*"artifacts"[^{}]*\}', raw_text, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'\{[^{}]*"summary"[^{}]*\}', raw_text, re.DOTALL)
-        if json_match:
-            import json as _json
-            try:
-                parsed = _json.loads(json_match.group(0))
-                if isinstance(parsed, dict):
-                    return parsed
-            except (_json.JSONDecodeError, ValueError):
-                pass
-
-        # 从文本中提取 unified diff 块
-        diff_pattern = re.compile(
-            r'(?:```(?:diff|patch)?\s*)?'
-            r'((?:---\s+\S+[\s\S]*?'
-            r'\+\+\+\s+\S+[\s\S]*?'
-            r'(?:@@[^@]*@@[\s\S]*?)+'
-            r'))',
-            re.MULTILINE,
-        )
-        diffs = diff_pattern.findall(raw_text)
-
-        artifacts = []
-        changed_files = []
-        seen_targets: set[str] = set()
-
-        for i, diff_content in enumerate(diffs):
-            # 从 diff 头提取目标文件
-            target_match = re.search(r'\+\+\+\s+[ba]/(\S+)', diff_content)
-            target = target_match.group(1) if target_match else f"unknown_file_{i}.patch"
-
-            if target.lower() not in seen_targets:
-                seen_targets.add(target.lower())
-                artifacts.append({
-                    "patch_type": "code",
-                    "target": target,
-                    "content": diff_content.strip(),
-                    "description": f"补丁 #{i+1} — 从非结构化输出中提取的 unified diff",
-                })
-                changed_files.append({
-                    "file": target,
-                    "change_type": "code",
-                    "reason": f"修复 {finding.vulnerability_type}",
-                })
-
-        # 如果没有完整的 diff，尝试提取代码块
-        if not diffs:
-            code_blocks = re.findall(r'```(?:\w+)?\s*\n([\s\S]*?)\n```', raw_text)
-            for i, code in enumerate(code_blocks):
-                if any(keyword in code for keyword in ("def ", "class ", "import ", "function", "return")):
-                    artifacts.append({
-                        "patch_type": "code",
-                        "target": f"suggested_fix_{i}.patch",
-                        "content": code.strip(),
-                        "description": f"代码片段 #{i+1} — 从非结构化输出提取，需人工审查",
-                    })
-
-        # 从文件中提取提到的文件路径
-        source_paths = [sf.path for sf in source_files if sf.path]
-        file_pattern = re.compile(
-            r'(?:修改|修改文件|修补|文件|patch|fix|change)[：:\s]*[一-鿿\w]*'
-            r'([\w./-]+\.(?:py|java|go|js|ts|jsx|tsx|c|cpp|h|hpp|rs|rb|php|yaml|yml|json|xml|html))',
-            re.IGNORECASE,
-        )
-        for match in file_pattern.finditer(raw_text):
-            fname = match.group(1)
-            if fname.lower() not in seen_targets:
-                seen_targets.add(fname.lower())
-                changed_files.append({
-                    "file": fname,
-                    "change_type": "code",
-                    "reason": f"在补丁文本中提及 — 修复 {finding.vulnerability_type}",
-                })
-
-        # 如果没有找到任何文件变更记录，从修复方案中提取
-        if not changed_files:
-            for change in remediation_plan.planned_changes:
-                cf = change.file
-                if cf.lower() not in seen_targets:
-                    seen_targets.add(cf.lower())
-                    changed_files.append({
-                        "file": cf,
-                        "change_type": change.change_type or "code",
-                        "reason": change.reason or f"来自修复方案的计划变更",
-                    })
-
-        summary = f"从非结构化补丁输出中提取: {finding.finding_id} — {finding.vulnerability_type}"
-        summary_match = re.search(r'(?:摘要|补丁摘要|summary)[：:\s]*(.+?)(?:\n|$)', raw_text, re.IGNORECASE)
-        if summary_match:
-            summary = summary_match.group(1).strip()[:300]
-
-        return {
-            "summary": summary,
-            "artifacts": artifacts,
-            "changed_files": changed_files,
-            "security_notes": ["⚠️ 补丁从非结构化输出中提取，需人工审查确认修复精准度"],
-            "assumptions": ["patch_extracted_from_unstructured_output"],
-            "risks": [
-                "非结构化输出可能遗漏关键修复步骤",
-                "补丁内容需人工审查行号和上下文是否正确",
-                "可能未覆盖所有受影响的调用点",
-            ],
-            "needs_human_review": True,
-            "blocked_reason": None,
-        }
-
     # ── API 契约检查（确定性源码分析，防止 LLM 幻觉）────────────────────
 
     @staticmethod
@@ -2951,6 +2702,7 @@ ID: {finding.finding_id}
                 or ("; ".join(violations) if violations else None)
             ),
             needs_human_review=bool(raw.get("needs_human_review", True)),
+            repair_session=raw.get("repair_session"),
         )
 
     @staticmethod
@@ -2977,6 +2729,8 @@ ID: {finding.finding_id}
         finding: NormalizedVulnerability,
         remediation_plan: RemediationPlan,
         reason: str,
+        *,
+        repair_session: dict | None = None,
     ) -> PatchCandidate:
         policy_check = PatchPolicyCheck(
             allowed_files_only=False, forbidden_changes_detected=False,
@@ -2993,6 +2747,7 @@ ID: {finding.finding_id}
             risks=list(remediation_plan.risk_points),
             validation_plan=PatchValidationPlan([], [], [], False),
             policy_check=policy_check, blocked_reason=reason, needs_human_review=True,
+            repair_session=repair_session,
         )
 
 
@@ -3126,7 +2881,11 @@ class PatchValidationAgent:
 
         return VerificationCheck(
             "planned_change_artifacts",
-            VerificationCheckStatus.FAILED,
+            (
+                VerificationCheckStatus.FAILED
+                if missing_required
+                else VerificationCheckStatus.SKIPPED
+            ),
             detail,
         )
 

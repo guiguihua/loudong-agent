@@ -52,11 +52,6 @@ def _validate_schema_required(result: dict[str, Any], schema: dict[str, Any] | N
     return missing
 
 
-def _model_schema(model_class: type, description: str, required_fields: list[str] | None = None) -> dict[str, Any]:
-    """从 dataclass 的 type hints 推断 JSON Schema。"""
-    return {"type": "object", "description": description, "properties": {}, "required": required_fields or []}
-
-
 # ── ImpactAssessment schema ───────────────────────────────────────────
 
 IMPACT_SCHEMA = {
@@ -793,13 +788,6 @@ class LLMBackend:
                 if repaired is not None:
                     return repaired
         return None
-
-    @staticmethod
-    def _try_fix_truncated_json(raw: str) -> dict[str, Any] | None:
-        """[DEPRECATED] 委托给 json_repair.repair_json。"""
-        from .json_repair import repair_json
-        return repair_json(raw)
-
 
 # ── 便捷函数 ──────────────────────────────────────────────────────────
 

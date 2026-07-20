@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from vuln_agent.models import (
@@ -21,9 +23,17 @@ from vuln_agent.models import (
 )
 from vuln_agent.normalization import VulnerabilityNormalizer
 from vuln_agent.patching import PatchGenerationAgent
-from vuln_agent.sast_executor import SASTCodeRepairExecutor
+from vuln_agent.sast_executor import (
+    SASTCodeRepairExecutor,
+    _peer_sql_security_controls,
+    _sql_oracle_problems,
+)
 from vuln_agent.semantic import PythonSemanticContextBuilder
 from vuln_agent.models import PlannedChange
+from vuln_agent.scenarios.sql_injection.taxonomy import (
+    SQLInjectionKind,
+    classify_sql_injection,
+)
 
 
 def make_finding(vulnerability_type: str, path: str, function: str):
@@ -112,6 +122,137 @@ def make_evidence(*commands: str) -> EvidenceBundle:
 
 
 class SASTWorkspaceExecutorTests(unittest.TestCase):
+    def test_sql_injection_taxonomy_distinguishes_four_contexts(self):
+        cases = [
+            ("SQL Injection", "search", SQLInjectionKind.VALUE),
+            ("SQL Alias Injection", "Query.set_values", SQLInjectionKind.IDENTIFIER),
+            ("SQL ORM Expression Injection", "annotate", SQLInjectionKind.ORM_EXPRESSION),
+            ("SQL order_by Injection", "apply_ordering", SQLInjectionKind.ORDERING),
+        ]
+        for vulnerability_type, function, expected in cases:
+            with self.subTest(expected=expected):
+                item = make_finding(vulnerability_type, "query.py", function)
+                self.assertEqual(classify_sql_injection(item), expected)
+
+    def test_identifier_repair_reuses_peer_guard_without_django_hardcoding(self):
+        path = "orm/query.py"
+        source = (
+            "class QueryBuilder:\n"
+            "    def check_identifier(self, identifier):\n"
+            "        if ';' in identifier:\n"
+            "            raise ValueError('unsafe identifier')\n"
+            "\n"
+            "    def add_projection(self, alias):\n"
+            "        self.check_identifier(alias)\n"
+            "\n"
+            "    def select_fields(self, fields):\n"
+            "        self.selected = tuple(fields)\n"
+        )
+        result = SASTCodeRepairExecutor(None).execute(
+            make_finding("SQL Identifier Injection", path, "QueryBuilder.select_fields"),
+            make_root(path, "QueryBuilder.select_fields"),
+            make_plan(path, "QueryBuilder.select_fields"),
+            [SourceFile(path, source)],
+            make_evidence(),
+        )
+        self.assertIsNone(result["blocked_reason"])
+        self.assertEqual(result["sql_injection_kind"], "identifier")
+        diff = result["artifacts"][0]["content"]
+        self.assertIn("+        for field in fields:", diff)
+        self.assertIn("+            self.check_identifier(field)", diff)
+        self.assertNotIn("set_values", diff)
+        self.assertNotIn("check_alias", diff)
+
+    def test_identifier_peer_control_ignores_unrelated_check_methods(self):
+        tree = ast.parse(
+            "class Query:\n"
+            "    def add_annotation(self, alias, expression):\n"
+            "        self.check_alias(alias)\n"
+            "        self.check_filterable(expression)\n"
+            "\n"
+            "    def set_values(self, fields):\n"
+            "        self.values_select = tuple(fields)\n"
+        )
+
+        controls = _peer_sql_security_controls(
+            tree,
+            "Query.set_values",
+            SQLInjectionKind.IDENTIFIER,
+        )
+
+        self.assertEqual(controls, {"self.check_alias"})
+
+    def test_django_506_identifier_repair_matches_upstream_guard_shape(self):
+        root = Path(__file__).resolve().parents[1]
+        fixture = (
+            root
+            / "validation-coverage"
+            / "sql-injection"
+            / "django-5.0.6"
+            / "django"
+            / "db"
+            / "models"
+            / "sql"
+            / "query.py"
+        )
+        path = "django/db/models/sql/query.py"
+        source = fixture.read_text(encoding="utf-8")
+        result = SASTCodeRepairExecutor(None).execute(
+            make_finding(
+                "SQL Identifier Injection",
+                path,
+                "Query.set_values",
+            ),
+            make_root(path, "Query.set_values"),
+            make_plan(path, "Query.set_values"),
+            [SourceFile(path, source)],
+            make_evidence(),
+            prefer_deterministic=True,
+        )
+
+        self.assertIsNone(result["blocked_reason"])
+        self.assertEqual(result["changed_files"][0]["file"], path)
+        diff = result["artifacts"][0]["content"]
+        self.assertIn("+            for field in fields:", diff)
+        self.assertIn("+                self.check_alias(field)", diff)
+        self.assertNotIn("check_filterable", diff)
+        self.assertNotIn("compiler.py", diff)
+
+    def test_sql_oracle_ignores_unsafe_sibling_function(self):
+        tree = ast.parse(
+            "def safe_target(cursor, value):\n"
+            "    cursor.execute('select * from users where id = %s', (value,))\n"
+            "\n"
+            "def unsafe_other(cursor, value):\n"
+            "    cursor.execute('select * from users where id = ' + value)\n"
+        )
+
+        self.assertEqual(
+            _sql_oracle_problems("large.py", tree, "safe_target"),
+            [],
+        )
+        self.assertTrue(
+            _sql_oracle_problems("large.py", tree, "unsafe_other"),
+        )
+
+    def test_sql_oracle_resolves_exact_class_method(self):
+        tree = ast.parse(
+            "class Query:\n"
+            "    def set_values(self, cursor, value):\n"
+            "        cursor.execute('select * from users where id = %s', (value,))\n"
+            "\n"
+            "def set_values(cursor, value):\n"
+            "    cursor.execute('select * from users where id = ' + value)\n"
+        )
+
+        self.assertEqual(
+            _sql_oracle_problems("query.py", tree, "Query.set_values"),
+            [],
+        )
+        self.assertTrue(_sql_oracle_problems("query.py", tree, "set_values"))
+        with self.assertRaisesRegex(ValueError, "could not be resolved"):
+            _sql_oracle_problems("query.py", tree, "Missing.set_values")
+
     def test_patch_generation_main_path_uses_workspace_executor(self):
         path = "src/user/search.py"
         source = (
@@ -142,9 +283,48 @@ class SASTWorkspaceExecutorTests(unittest.TestCase):
         self.assertEqual(candidate.status, PatchCandidateStatus.GENERATED)
         self.assertEqual(
             agent.last_execution.details["executor"],
-            "sast_workspace_executor",
+            "repair_kernel:sql_injection_v1",
         )
+        session = agent.last_execution.details["repair_session"]
+        self.assertEqual(session["mode"], "candidate_only")
+        self.assertEqual(session["status"], "candidate_only")
+        self.assertIn("business_oracle", session["contract"]["missing_for_automation"])
         self.assertEqual(len(candidate.artifacts), 2)
+
+    def test_blocked_kernel_session_reaches_execution_and_candidate(self):
+        path = "src/user/search.py"
+        safe_source = (
+            "from flask import request\n\n\n"
+            "def search_users(cursor):\n"
+            "    keyword = request.args.get(\"q\", \"\")\n"
+            "    sql = \"select * from users where name like %s\"\n"
+            "    cursor.execute(sql, (f\"%{keyword}%\",))\n"
+            "    return cursor.fetchall()\n"
+        )
+        agent = PatchGenerationAgent(PatchGenerationPolicy(), llm=None)
+        candidate = agent.generate(
+            make_finding("SQL Injection", path, "search_users"),
+            SimpleNamespace(),
+            make_root(path, "search_users"),
+            make_plan(path, "search_users"),
+            RepositoryContext(language="Python", test_framework="pytest"),
+            [
+                SourceFile(path, safe_source),
+                SourceFile(
+                    "tests/test_user_search.py",
+                    "def test_existing():\n    assert True\n",
+                ),
+            ],
+            evidence_bundle=make_evidence(),
+        )
+        self.assertEqual(candidate.status, PatchCandidateStatus.BLOCKED)
+        execution_session = agent.last_execution.details["repair_session"]
+        self.assertEqual(execution_session["status"], "baseline_blocked")
+        self.assertEqual(candidate.repair_session, execution_session)
+        self.assertEqual(
+            candidate.to_dict()["repair_session"]["failure_stage"],
+            "verify_baseline",
+        )
 
     def test_sql_injection_uses_ast_edit_and_git_generated_diff(self):
         path = "src/user/search.py"

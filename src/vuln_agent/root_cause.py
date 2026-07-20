@@ -27,7 +27,7 @@ from .models import (
     RootCauseAssessment,
     RootCauseCategory,
 )
-from .tools import DependencyRootCauseContext, RootCauseCodeContext, RootCauseEvidenceTool
+from .tools import RootCauseEvidenceTool
 from .reasoning import (
     PipelineMode,
     ReasoningMode,
@@ -261,6 +261,75 @@ class RootCauseAnalysisAgent(BaseAgent):
         slice_text: dict[str, str] = {}
         for item in bundle.code_slices:
             slice_text[item.path] = slice_text.get(item.path, "") + "\n" + item.content
+
+        peer_controls = [
+            item.reason.split(
+                "peer identifier security control:",
+                1,
+            )[1].split(";", 1)[0].strip()
+            for item in bundle.code_slices
+            if "peer identifier security control:" in item.reason
+        ]
+        if peer_controls and finding.locations:
+            target = finding.locations[0]
+            target_path = target.file.replace("\\", "/").lstrip("./")
+            control = sorted(set(peer_controls))[0]
+            symbol = target.function or "<module>"
+            assessment.root_cause_category = (
+                RootCauseCategory.MISSING_INPUT_VALIDATION
+            )
+            assessment.root_cause.summary = (
+                f"{symbol} accepts SQL identifier/alias input but omits the "
+                f"existing sibling guard {control} before storing it in the "
+                "query representation."
+            )
+            assessment.root_cause.source = CodePoint(
+                symbol,
+                target_path,
+                target.line,
+            )
+            assessment.root_cause.sink = CodePoint(
+                symbol,
+                target_path,
+                target.line,
+            )
+            assessment.root_cause.missing_control = (
+                f"apply {control} to every incoming identifier at {symbol}"
+            )
+            assessment.root_cause.failed_existing_controls = [
+                FailedControl(
+                    control,
+                    "the control exists on sibling identifier ingress paths "
+                    f"but is not called by {symbol}",
+                )
+            ]
+            assessment.affected_code = [
+                AffectedCode(
+                    target_path,
+                    symbol,
+                    [target.line] if target.line else [],
+                    "primary_cause",
+                )
+            ]
+            assessment.security_invariant = (
+                "Every external SQL identifier or alias must pass the existing "
+                f"peer guard {control} at its ingress boundary."
+            )
+            assessment.broken_mechanism = list(dict.fromkeys([
+                *assessment.broken_mechanism,
+                "peer_control_missing_at_identifier_ingress",
+            ]))
+            assessment.recommended_fix_constraints = list(dict.fromkeys([
+                (
+                    f"Reuse {control} in {symbol}; do not change the downstream "
+                    "SQL compiler's trusted-alias behavior."
+                ),
+                *assessment.recommended_fix_constraints,
+            ]))
+            assessment.confidence_score = max(
+                assessment.confidence_score,
+                0.85,
+            )
 
         def resolve(path: str | None) -> str | None:
             if not path:

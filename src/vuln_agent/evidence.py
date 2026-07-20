@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import io
@@ -29,6 +30,7 @@ from .models import (
     TestEvidence,
     ValidationCapabilities,
 )
+from .validation_adapters import DjangoValidationCommandAdapter
 
 
 _LANGUAGES = {
@@ -143,6 +145,13 @@ class EvidenceCollector:
                     self.context_lines,
                     f"finding target: {location.function or location.file}",
                 )
+        self._collect_peer_identifier_controls(
+            finding,
+            file_map,
+            slices,
+            slice_keys,
+            char_budget,
+        )
 
         entry_points = self._collect_entry_points(scan_files, slices, slice_keys, char_budget)
         source_candidates = self._collect_candidates(
@@ -214,6 +223,150 @@ class EvidenceCollector:
             self._cache.popitem(last=False)
         return bundle
 
+    def _collect_peer_identifier_controls(
+        self,
+        finding: NormalizedVulnerability,
+        file_map: dict[str, str],
+        slices: list[CodeSlice],
+        slice_keys: set[tuple[str, int, int]],
+        char_budget: list[int],
+    ) -> None:
+        """Collect a sibling identifier guard as first-class root-cause evidence."""
+
+        from .scenarios.sql_injection.taxonomy import (
+            SQLInjectionKind,
+            classify_sql_injection,
+            is_sql_injection,
+        )
+        from .sast_executor import _peer_sql_security_controls
+
+        if (
+            not is_sql_injection(finding)
+            or classify_sql_injection(finding) != SQLInjectionKind.IDENTIFIER
+        ):
+            return
+        for location in finding.locations:
+            if not location.function:
+                continue
+            for path in self._match_paths(location.file, file_map):
+                content = file_map[path]
+                try:
+                    tree = ast.parse(content)
+                except SyntaxError:
+                    continue
+                target_symbol, parent = self._qualified_python_symbol(
+                    tree,
+                    location.function,
+                    location.line,
+                )
+                if not target_symbol or not isinstance(parent, ast.ClassDef):
+                    continue
+                controls = _peer_sql_security_controls(
+                    tree,
+                    target_symbol,
+                    SQLInjectionKind.IDENTIFIER,
+                )
+                for control in sorted(controls):
+                    leaf = control.rsplit(".", 1)[-1]
+                    definition = next(
+                        (
+                            node
+                            for node in parent.body
+                            if isinstance(
+                                node,
+                                (ast.FunctionDef, ast.AsyncFunctionDef),
+                            )
+                            and node.name == leaf
+                        ),
+                        None,
+                    )
+                    if definition is None:
+                        continue
+                    marker = (
+                        f"peer identifier security control: {control}"
+                    )
+                    containing_slice = next(
+                        (
+                            item
+                            for item in slices
+                            if item.path == path
+                            and item.start_line
+                            <= definition.lineno
+                            <= item.end_line
+                        ),
+                        None,
+                    )
+                    if containing_slice is not None:
+                        if marker not in containing_slice.reason:
+                            containing_slice.reason += f"; {marker}"
+                        continue
+                    self._add_slice(
+                        slices,
+                        slice_keys,
+                        char_budget,
+                        path,
+                        content.splitlines(),
+                        definition.lineno,
+                        self.candidate_context_lines,
+                        marker,
+                    )
+
+    @staticmethod
+    def _qualified_python_symbol(
+        tree: ast.AST,
+        function: str,
+        line: int | None,
+    ) -> tuple[str | None, ast.AST | None]:
+        matches: list[tuple[str, ast.AST, ast.AST]] = []
+
+        def visit(
+            node: ast.AST,
+            parents: tuple[str, ...] = (),
+            parent: ast.AST | None = None,
+        ) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(
+                    child,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                ):
+                    qualname = ".".join((*parents, child.name))
+                    if (
+                        isinstance(
+                            child,
+                            (ast.FunctionDef, ast.AsyncFunctionDef),
+                        )
+                        and (
+                            child.name == function
+                            or qualname == function
+                            or qualname.endswith("." + function)
+                        )
+                    ):
+                        matches.append((qualname, child, parent or node))
+                    visit(child, (*parents, child.name), child)
+                else:
+                    visit(child, parents, parent)
+
+        visit(tree)
+        if not matches:
+            return None, None
+        if line is not None:
+            containing = [
+                item
+                for item in matches
+                if item[1].lineno <= line <= getattr(
+                    item[1],
+                    "end_lineno",
+                    item[1].lineno,
+                )
+            ]
+            if containing:
+                matches = containing
+        selected = min(
+            matches,
+            key=lambda item: abs(item[1].lineno - (line or item[1].lineno)),
+        )
+        return selected[0], selected[2]
+
     @staticmethod
     def _normalized_files(source_files: list[SourceFile]) -> list[SourceFile]:
         deduped: dict[str, str] = {}
@@ -229,7 +382,7 @@ class EvidenceCollector:
             "files": [(item.path, hashlib.sha256(item.content.encode("utf-8")).hexdigest()) for item in files],
             "repository": asdict(repository),
             "engineering": asdict(engineering),
-            "schema": 2,
+            "schema": 3,
             "collector": {
                 "context_lines": self.context_lines,
                 "candidate_context_lines": self.candidate_context_lines,
@@ -460,15 +613,29 @@ class EvidenceCollector:
         paths = [item.path for item in files]
         basenames = {self._basename(path) for path in paths}
         test_paths = [path for path in paths if self._is_test_path(path)]
+        django_source_tree = DjangoValidationCommandAdapter.detects_paths(paths)
         detected: list[str] = []
-        build: list[str] = []
+        build: list[str] = list(engineering.available_build_commands)
         tests = list(engineering.available_test_commands)
+        security = list(engineering.available_security_commands)
+        poc = list(engineering.available_poc_commands)
 
         if "pyproject.toml" in basenames or "pytest.ini" in basenames or test_paths and any(p.endswith(".py") for p in test_paths):
-            detected.append("python")
+            detected.append("django-runtests" if django_source_tree else "python")
             build.append("python -m compileall -q .")
-            tests.append("python -m pytest")
-        if "package.json" in basenames:
+            if not django_source_tree:
+                tests.append("python -m pytest")
+        python_target = any(
+            location.file and location.file.lower().endswith(".py")
+            for location in finding.locations
+        )
+        if "package.json" in basenames and not (
+            django_source_tree
+            and (
+                python_target
+                or (engineering.framework or "").lower() == "django"
+            )
+        ):
             detected.append("npm")
             tests.append("npm test")
         if "pom.xml" in basenames:
@@ -481,7 +648,7 @@ class EvidenceCollector:
             detected.append("cargo")
             tests.append("cargo test")
 
-        scanner: list[str] = []
+        scanner: list[str] = list(engineering.available_scanner_commands)
         dependency_manifests = basenames.intersection({
             "requirements.txt", "pyproject.toml", "package.json", "pom.xml",
             "go.mod", "cargo.toml",
@@ -524,16 +691,25 @@ class EvidenceCollector:
                 term in lowered for term in vuln_terms
             )
             test_evidence.append(TestEvidence(path, self._test_framework(path), None, related, None))
+        related_python_tests = [
+            item.path
+            for item in test_evidence
+            if item.related and item.path and item.path.endswith(".py")
+        ]
+        if django_source_tree:
+            focused = DjangoValidationCommandAdapter.focused_command(
+                "python",
+                related_python_tests,
+            )
+            if focused:
+                tests.append(focused)
         for command in dict.fromkeys(tests):
             test_evidence.append(TestEvidence(None, None, command, False, None))
-        security = [command for command in tests if "security" in command.lower()]
-        for item in test_evidence:
-            if item.related and item.path and item.path.endswith(".py"):
-                security.append(f"python -m pytest {item.path}")
         return test_evidence, ValidationCapabilities(
             build_commands=list(dict.fromkeys(build)),
             test_commands=list(dict.fromkeys(tests)),
             security_commands=list(dict.fromkeys(security)),
+            poc_commands=list(dict.fromkeys(poc)),
             scanner_commands=scanner,
             detected_tools=list(dict.fromkeys(detected)),
         )
@@ -654,11 +830,6 @@ class EvidenceCollector:
                                 return f"{class_match.group(1)}.{name}"
                     return name
         return "<module>"
-
-    @staticmethod
-    def _match_path(expected, file_map):
-        matches = EvidenceCollector._match_paths(expected, file_map)
-        return matches[0] if matches else None
 
     @staticmethod
     def _match_paths(expected, file_map) -> list[str]:

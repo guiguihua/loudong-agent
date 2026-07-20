@@ -16,7 +16,6 @@ from .models import (
     ApiEntryPoint,
     AssessmentStatus,
     Confidence,
-    Evidence,
     EvidenceBundle,
     ImpactAssessment,
     NormalizedVulnerability,

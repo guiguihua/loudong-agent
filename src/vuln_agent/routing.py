@@ -214,7 +214,10 @@ class VulnerabilityRouter:
                 "dependency_fixed_version",
                 "dependency_manifest",
             },
-            VulnerabilityFamily.SAST_CODE: {"target_source_file"},
+            VulnerabilityFamily.SAST_CODE: {
+                "target_source_file",
+                "business_regression_command",
+            },
             VulnerabilityFamily.MEMORY_SAFETY: {
                 "target_source_file",
                 "poc_or_sanitizer_reproducer",

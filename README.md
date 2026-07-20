@@ -36,7 +36,9 @@
       ▼ RepairTaskClassifier（确定性能力路由 + 证据资格门禁 + VerificationProfile）
       │
       ▼ PatchGenerationAgent / 专业 Repair Executor
-      │   SQL/命令注入/路径穿越：AST ChangeSet → 隔离 Git 工作区
+      │   SQL 注入：RepairKernel → ReproductionContract → RepairSession
+      │   → AST 结构化编辑 → Oracle 闭环 → CounterexampleMemory
+      │   命令注入/路径穿越：AST ChangeSet → 隔离 Git 工作区
       │   → 结构化符号编辑 → 聚焦测试 → Git 生成 Unified Diff
       │   依赖漏洞：SCA ChangeSet → 精确修改 manifest → 版本/语法/锁文件门禁
       │   未接入专业执行器或证据不足：blocked，不进入通用补丁合成
@@ -152,7 +154,11 @@
 
 #### PatchGenerationAgent (`patching.py`)
 - 继承 BaseAgent，作为补丁执行入口和候选数据适配层
-- SQL 注入、命令注入、路径穿越路由到 `SASTCodeRepairExecutor`
+- SQL 注入路由到通用 `RepairKernel` 和 `SQLInjectionRepairScenario`
+- `RepairKernel` 先验证基线漏洞可复现，再按“模型初试 → 反例重试 → 确定性回退”搜索补丁
+- `RepairSession` 保存修复契约、完整 Oracle 证据、结构化 EditIR、候选历史和失败语义指纹
+- 缺少安全或业务回归命令时，Router 不允许自动修复；直接调用场景内核时也只返回 `candidate_only`
+- 命令注入、路径穿越继续路由到 `SASTCodeRepairExecutor`
 - `PythonSemanticContextBuilder` 使用 AST 获取完整目标函数、定义和直接引用，不截断目标符号
 - 先创建隔离 Git 工作区并锁定文件哈希，再让 LLM 输出结构化符号编辑
 - 编辑由工具按 AST 边界执行；LLM 不负责 unified diff hunk 行号
@@ -580,6 +586,12 @@ loudong-agent/
 │   ├── routing.py           # 漏洞家族、执行器和 VerificationProfile 路由
 │   ├── quality.py           # 单任务补丁质量门禁
 │   ├── baseline.py          # Verified Patch Rate 与发布门禁
+│   ├── repair/              # 通用 RepairKernel、RepairSession、Oracle 和质量基准
+│   │   ├── benchmark.py     # 60例基准清单与 pass@k/精确率指标
+│   │   ├── kernel.py        # 基线复现、候选搜索、验收和反例闭环
+│   │   └── models.py        # ReproductionContract/EditIR/Counterexample
+│   ├── scenarios/           # 可插拔漏洞场景包
+│   │   └── sql_injection/   # SQL 报告、复现、编辑和 Oracle 适配器
 │   ├── reasoning.py         # PipelineMode / ReasoningMode / StagePolicy
 │   ├── remediation.py       # RemediationPlanAgent (Plan-and-Solve + Ranking)
 │   ├── reporting.py         # RemediationReportAgent (双格式报告)

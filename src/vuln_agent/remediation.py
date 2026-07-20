@@ -20,7 +20,6 @@ from .reasoning import (
 )
 from .models import (
     CompatibilityAssessment,
-    DependencyUpgradePlan,
     EngineeringContext,
     EvidenceBundle,
     FailureAnalysisResult,
@@ -298,7 +297,38 @@ class RemediationPlanAgent(BaseAgent):
                 description=change.description,
                 reason=change.reason,
                 risk_level=change.risk_level,
+                causally_required=change.causally_required,
             ))
+
+        if (
+            "peer_control_missing_at_identifier_ingress"
+            in root_cause.broken_mechanism
+        ):
+            target_paths = {
+                RemediationPlanAgent._resolve_repository_path(
+                    location.file,
+                    known_paths,
+                )
+                for location in finding.locations
+                if location.file
+            }
+            target_paths.discard(None)
+            out_of_scope = [
+                change for change in valid_changes
+                if change.file not in target_paths
+            ]
+            valid_changes = [
+                change for change in valid_changes
+                if change.file in target_paths
+            ]
+            for change in out_of_scope:
+                plan.rejected_alternatives.append(RejectedAlternative(
+                    alternative=f"modify {change.file}",
+                    reason=(
+                        "peer-control comparison localized the missing guard "
+                        "to the reported identifier ingress boundary"
+                    ),
+                ))
 
         if not valid_changes:
             for path in RemediationPlanAgent._root_cause_change_paths(
